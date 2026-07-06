@@ -1,7 +1,16 @@
-/* Last tested on QuPath-0.5.1
- * 
- * This scripts requires qupath-extension-cellpose 
- * cf https://github.com/BIOP/qupath-extension-cellpose
+/*
+ * Ths script tries to detect both the nucleus and the external cell shape,
+ * in two different Cellpose runs, and merges the corresponding nucleus and cell
+ * together in a QuPath cell object.
+ *
+ * dependencies
+ *      This scripts requires qupath-extension-cellpose
+ *      cf https://github.com/BIOP/qupath-extension-cellpose
+ *
+ * authors: Olivier Burri - PTBIOP
+ *          Felipe Passarela - Federal University of Espírito Santo (UFES)
+ *
+ *  Last tested on QuPath-0.7.0
  */
 
 // some qp that we need to detect objects and measure them
@@ -16,7 +25,7 @@ if (pathObjects.isEmpty()) {
     createSelectAllObject(true)
 }
 
-clearDetections()
+removeDetections()
 
 // Create a Cellpose detectors for cyto and nuclei
 def pathModel_cyto = 'cyto3'
@@ -49,13 +58,40 @@ nucs = getDetectionObjects()
 // make sure to clear everything 
 clearDetections()
 
-// Combine cytos and nuclei detections to create cell objects
-// (we simply check that the nuclei center is inside the cell center) 
-cells = []
-cytos.each{ cyto ->
-    nucs.each{ nuc ->      
-        if ( cyto.getROI().contains( nuc.getROI().getCentroidX() , nuc.getROI().getCentroidY())){
-            cells.add(PathObjects.createCellObject(cyto.getROI(), nuc.getROI(), getPathClass("Cellpose"), null ));
+println "Combining ${cytos.size()} cytos and ${nucs.size()} nuclei to create cell objects"
+// For combining we simply check that the nuclei center is inside the cell center
+
+// Build a spatial index to efficiently query nearby nuclei.
+def tree = new STRtree()
+nucs.each { nuc ->
+    def roi = nuc.getROI()
+    def indexedNucleus = [
+        roi: roi,
+        x: roi.getCentroidX(),
+        y: roi.getCentroidY()
+    ]
+    def envelope = GeometryTools.roiToEnvelope(roi)
+    tree.insert(envelope, indexedNucleus)
+}
+tree.build()
+
+def cells = []
+for (cyto in cytos) {
+    def cytoROI = cyto.getROI()
+    def envelope = GeometryTools.roiToEnvelope(cytoROI)
+    def candidates = tree.query(envelope)
+
+    for (candNuc in candidates) {
+        // Keep only nuclei whose centroids lie inside the cytoplasm.
+        if (cytoROI.contains(candNuc.x, candNuc.y)) {
+            def cellObject = PathObjects.createCellObject(
+                cytoROI,
+                candNuc.roi,
+                getPathClass("Cellpose"),
+                null
+            )
+            cells.add(cellObject)
+            break // Cell objects can contain only one nucleus, so stop after the first match.
         }
     }
 }
@@ -66,8 +102,7 @@ addObjects(cells)
 def measurements = ObjectMeasurements.Measurements.values() as List
 def compartments = ObjectMeasurements.Compartments.values() as List // Won't mean much if they aren't cells...
 def shape = ObjectMeasurements.ShapeFeatures.values() as List
-def cells = getCellObjects()
-for ( cell in cells) {
+for (cell in getCellObjects()) {
     ObjectMeasurements.addIntensityMeasurements( server, cell, downsample, measurements, compartments )
     ObjectMeasurements.addCellShapeMeasurements( cell, cal,  shape )
 }
@@ -79,3 +114,5 @@ println 'Done!'
  */
 import qupath.ext.biop.cellpose.Cellpose2D
 import qupath.lib.analysis.features.ObjectMeasurements
+import qupath.lib.roi.GeometryTools
+import org.locationtech.jts.index.strtree.STRtree
