@@ -1,7 +1,16 @@
-/* Last tested on QuPath-0.7.0
- * 
- * This scripts requires qupath-extension-cellpose 
- * cf https://github.com/BIOP/qupath-extension-cellpose
+/*
+ * Ths script tries to detect both the nucleus and the external cell shape,
+ * in two different Cellpose runs, and merges the corresponding nucleus and cell
+ * together in a QuPath cell object.
+ *
+ * dependencies
+ *      This scripts requires qupath-extension-cellpose
+ *      cf https://github.com/BIOP/qupath-extension-cellpose
+ *
+ * authors: Olivier Burri - PTBIOP
+ *          Felipe Passarela - Federal University of Espírito Santo (UFES)
+ *
+ *  Last tested on QuPath-0.7.0
  */
 
 // some qp that we need to detect objects and measure them
@@ -16,7 +25,7 @@ if (pathObjects.isEmpty()) {
     createSelectAllObject(true)
 }
 
-clearDetections()
+removeDetections()
 
 // Create a Cellpose detectors for cyto and nuclei
 def pathModel_cyto = 'cyto3'
