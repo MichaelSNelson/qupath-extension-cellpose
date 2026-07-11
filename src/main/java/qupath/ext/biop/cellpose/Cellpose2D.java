@@ -40,6 +40,11 @@ import org.locationtech.jts.index.strtree.STRtree;
 import org.locationtech.jts.simplify.VWSimplifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.biop.cellpose.backend.ApposeBackend;
+import qupath.ext.biop.cellpose.backend.CellposeBackend;
+import qupath.ext.biop.cellpose.backend.CellposeSegmentationParams;
+import qupath.ext.biop.cellpose.backend.CellposeTransport;
+import qupath.ext.biop.cellpose.backend.SubprocessBackend;
 import qupath.ext.biop.cmd.VirtualEnvironmentRunner;
 import qupath.fx.dialogs.Dialogs;
 import qupath.fx.utils.FXUtils;
@@ -83,7 +88,6 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
-import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -99,12 +103,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -176,6 +178,8 @@ public class Cellpose2D {
     protected File modelDirectory;
     protected boolean doReadResultsAsynchronously;
     protected boolean useCellposeSAM;
+    // Chosen transport for detection. Null means "fall back to the extension preference".
+    protected CellposeTransport transport;
     File tempDirectory;
     private List<String> theLog;
     private ResultsTable trainingResults;
@@ -467,9 +471,10 @@ public class Cellpose2D {
         }).flatMap(List::stream).collect(Collectors.toList());
 
         // Here the files are saved, and we can run cellpose to recover the masks
+        // The transport (external subprocess, the default, or in-process Appose) is chosen here.
 
-        try {
-            runCellpose(allTiles);
+        try (CellposeBackend backend = createDetectionBackend()) {
+            backend.run(allTiles, buildSegmentationParams());
         } catch (IOException | InterruptedException e) {
             logger.error("Failed to Run Cellpose", e);
             return;
@@ -835,152 +840,52 @@ public class Cellpose2D {
     }
 
     /**
-     * This class actually runs Cellpose by calling the virtual environment
+     * Create the backend that will run Cellpose for detection. The builder flag (if set through
+     * {@link CellposeBuilder#transport(CellposeTransport)}/{@link CellposeBuilder#useAppose()})
+     * takes precedence; otherwise the extension-wide preference is honored. The default is the
+     * external subprocess transport, which is unchanged from the historical behaviour.
      *
-     * @throws IOException          Exception in case files could not be read
-     * @throws InterruptedException Exception in case of command thread has some failing
+     * @return a ready-to-use {@link CellposeBackend}
      */
-    private void runCellpose(List<TileFile> allTiles) throws InterruptedException, IOException {
-
-        // Need to define the name of the command we are running. We used to be able to use 'cellpose' for both but not since Cellpose v2
-        String runCommand = this.parameters.containsKey("omni") ? "omnipose" : "cellpose";
-        VirtualEnvironmentRunner veRunner = getVirtualEnvironmentRunner();
-
-        // This is the list of commands after the 'python' call
-        // We want to ignore all warnings to make sure the log is clean (-W ignore)
-        // We want to be able to call the module by name (-m)
-        // We want to make sure UTF8 mode is by default (-X utf8)
-        List<String> cellposeArguments = new ArrayList<>(Arrays.asList("-Xutf8", "-W", "ignore", "-m", runCommand));
-
-        cellposeArguments.add("--dir");
-        cellposeArguments.add("" + this.tempDirectory);
-
-        cellposeArguments.add("--pretrained_model");
-        cellposeArguments.add(this.model);
-
-        this.parameters.forEach((parameter, value) -> {
-            cellposeArguments.add("--" + parameter);
-            if (value != null) {
-                cellposeArguments.add(value);
-            }
-        });
-
-        // These all work for cellpose v2
-        cellposeArguments.add("--save_tif");
-
-        cellposeArguments.add("--no_npy");
-
-        if (!this.disableGPU) cellposeArguments.add("--use_gpu");
-
-        cellposeArguments.add("--verbose");
-
-        veRunner.setArguments(cellposeArguments);
-
-        // Finally, we can run Cellpose
-        veRunner.runCommand(false);
-
-        processCellposeFiles(veRunner, allTiles);
+    private CellposeBackend createDetectionBackend() {
+        CellposeTransport chosen = CellposeBackend.resolveTransport(this.transport, CellposeExtension.getTransportPreference());
+        // The mask reader stays in this class (unchanged); both backends invoke it through this callback.
+        Consumer<TileFile> tileReader = tile -> tile.setCandidates(readObjectsFromTileFile(tile));
+        if (chosen == CellposeTransport.APPOSE) {
+            logger.info("Running Cellpose with the in-process (Appose) backend");
+            return new ApposeBackend(tileReader);
+        }
+        logger.info("Running Cellpose with the external subprocess backend");
+        return new SubprocessBackend(this.tempDirectory, this.parameters, this.model, this.disableGPU,
+                this.doReadResultsAsynchronously, this::getVirtualEnvironmentRunner, tileReader);
     }
 
-    private void processCellposeFiles(VirtualEnvironmentRunner veRunner, List<TileFile> allTiles) throws CancellationException, InterruptedException, IOException {
+    /**
+     * Distill the Cellpose flag map into a {@link CellposeSegmentationParams} value object for the
+     * in-process backend. The external subprocess backend does not use this (it builds its command
+     * from the raw flag map).
+     *
+     * @return the segmentation parameters
+     */
+    private CellposeSegmentationParams buildSegmentationParams() {
+        CellposeSegmentationParams.Builder builder = CellposeSegmentationParams.builder()
+                .cellposeSam(this.useCellposeSAM)
+                .useGpu(!this.disableGPU)
+                .model(this.model)
+                .customModel(new File(this.model).exists());
 
-        // Make sure that allTiles is not null, if it is, just return null
-        // as we are likely just running validation and thus do not need to give any results back
-        if (allTiles == null) {
-            veRunner.getProcess().waitFor();
-            return;
-        }
+        if (this.parameters.containsKey("diameter"))
+            builder.diameter(Double.parseDouble(this.parameters.get("diameter")));
+        if (this.parameters.containsKey("flow_threshold"))
+            builder.flowThreshold(Double.parseDouble(this.parameters.get("flow_threshold")));
+        if (this.parameters.containsKey("cellprob_threshold"))
+            builder.cellprobThreshold(Double.parseDouble(this.parameters.get("cellprob_threshold")));
+        if (this.parameters.containsKey("chan"))
+            builder.channel1(Integer.parseInt(this.parameters.get("chan")));
+        if (this.parameters.containsKey("chan2"))
+            builder.channel2(Integer.parseInt(this.parameters.get("chan2")));
 
-        // Build a thread pool to process reading the images in parallel
-        ExecutorService executor = Executors.newFixedThreadPool(5);
-
-        if (!this.doReadResultsAsynchronously) {
-            // We need to wait for the process to finish
-            veRunner.getProcess().waitFor();
-            allTiles.forEach(entry -> {
-                executor.execute(() -> {
-                    // Read the objects from the file
-                    entry.setCandidates(readObjectsFromTileFile(entry));
-                });
-
-            });
-        } else { // Experimental file listening and running
-
-            //Make a map of the original names and the expected names
-            LinkedHashMap<File, TileFile> remainingFiles = allTiles.stream().map(entry -> {
-                File expectedFile = entry.getLabelFile();
-                return new AbstractMap.SimpleEntry<>(expectedFile, entry);
-            }).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (a, b) -> b, LinkedHashMap::new));
-
-            try {
-                // We need to listen for changes in the temp folder
-                veRunner.startWatchService(this.tempDirectory.toPath());
-
-                // The command above will run in a separate thread, now we can start listening for the files changing
-                while (!remainingFiles.isEmpty() && veRunner.getProcess().isAlive()) {
-                    if (!veRunner.getProcess().isAlive()) {
-                        // It's no longer running so check the exit code
-                        int exitValue = veRunner.getProcess().exitValue();
-                        if (exitValue != 0) {
-                            throw new IOException("Cellpose process exited with value " + exitValue + ". Please check output above for indications of the problem.\nWill attempt to continue");
-                        }
-                    }
-
-                    // Get the files that have changes
-                    List<String> changedFiles = veRunner.getChangedFiles();
-
-                    if (changedFiles.isEmpty()) {
-                        continue;
-                    }
-
-                    // Find the tiles that corresponds to the changed files
-                    LinkedHashMap<File, TileFile> finishedFiles = remainingFiles.entrySet().stream().filter(set -> {
-                        // Create a file that matches the mask name
-                        return changedFiles.contains(set.getKey().getName());
-                    }).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (a, b) -> b, LinkedHashMap::new));
-
-                    // Announce that these files are done
-                    finishedFiles.forEach((key, tile) -> executor.execute(() -> {
-                        // Read the objects from the file
-                        tile.setCandidates(readObjectsFromTileFile(tile));
-                    }));
-
-                    // Remove from the queue
-                    finishedFiles.forEach((k, v) -> {
-                        remainingFiles.remove(k);
-                    });
-                }
-            } catch (IOException e) {
-                logger.error(e.getMessage(), e);
-
-            } finally {
-                // No matter what, try and check if there are tiles left
-
-                // Get the files that have changes
-                List<String> changedFiles = veRunner.getChangedFiles();
-
-                // Find the tiles that corresponds to the changed files
-                LinkedHashMap<File, TileFile> finishedFiles = remainingFiles.entrySet().stream().filter(set -> {
-                    // Create a file that matches the mask name
-                    return changedFiles.contains(set.getKey().getName());
-                }).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (a, b) -> b, LinkedHashMap::new));
-
-                // Announce that these files are done
-                finishedFiles.forEach((key, tile) -> {
-                    executor.execute(() -> {
-                        // Read the objects from the file
-                        tile.setCandidates(readObjectsFromTileFile(tile));
-                    });
-                });
-                // Remove them from the list of remaining files
-
-                veRunner.closeWatchService();
-
-            }
-        }
-
-        executor.shutdown();
-        executor.awaitTermination(10, TimeUnit.MINUTES);
+        return builder.build();
     }
 
     /**
@@ -1084,7 +989,11 @@ public class Cellpose2D {
         this.model = this.modelFile.getAbsolutePath();
 
         try {
-            runCellpose(null);
+            // Validation runs Cellpose only (no result reading), always through the subprocess
+            // transport, so the QC path is unaffected by the detection transport preference.
+            CellposeBackend backend = new SubprocessBackend(this.tempDirectory, this.parameters, this.model,
+                    this.disableGPU, this.doReadResultsAsynchronously, this::getVirtualEnvironmentRunner, null);
+            backend.run(null, null);
         } catch (InterruptedException | IOException e) {
             logger.error(e.getMessage(), e);
         }
@@ -1624,78 +1533,4 @@ public class Cellpose2D {
         }
     }
 
-    /**
-     * Static class to hold the correspondence between a
-     * RegionRequest and a saved file.
-     * This also contains a way to infer the resulting image mask file name
-     */
-    private static class TileFile {
-        private final RegionRequest request;
-        private final File imageFile;
-        private final PathObject parent;
-
-        private Collection<CandidateObject> candidates = Collections.emptyList();
-
-
-        TileFile(RegionRequest request, File imageFile, PathObject parent) {
-            this.request = request;
-            this.parent = parent;
-            this.imageFile = imageFile;
-        }
-
-        public File getImageFile() {
-            return imageFile;
-        }
-
-        public File getLabelFile() {
-            return new File(FilenameUtils.removeExtension(imageFile.getAbsolutePath()) + "_cp_masks.tif");
-        }
-
-        public RegionRequest getTile() {
-            return request;
-        }
-
-        public PathObject getParent() {
-            return parent;
-        }
-
-        public Collection<CandidateObject> getCandidates() {
-            return this.candidates;
-        }
-
-        public void setCandidates(Collection<CandidateObject> candidates) {
-            this.candidates = candidates;
-        }
-    }
-
-    /**
-     * Static class that holds each geometry in order to quickly check overlaps
-     */
-    private static class CandidateObject {
-        private final double area;
-        private Geometry geometry;
-        private final PathObject parent; // Perhaps this duplicated things a bit, but we need it to sort the data
-
-        CandidateObject(Geometry geom, PathObject parent) {
-            this.geometry = geom;
-            this.area = geom.getArea();
-            this.parent = parent;
-
-            // Clean up the geometry already
-            geometry = GeometryTools.ensurePolygonal(geometry);
-
-            // Keep only largest polygon?
-            double maxArea = -1;
-            int index = -1;
-
-            for (int i = 0; i < geometry.getNumGeometries(); i++) {
-                double area = geometry.getGeometryN(i).getArea();
-                if (area > maxArea) {
-                    maxArea = area;
-                    index = i;
-                }
-            }
-            geometry = geometry.getGeometryN(index);
-        }
-    }
 }

@@ -1,5 +1,6 @@
 package qupath.ext.biop.cellpose;
 
+import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.StringProperty;
 import org.controlsfx.control.PropertySheet;
 import org.controlsfx.control.action.Action;
@@ -12,6 +13,7 @@ import qupath.lib.gui.extensions.GitHubProject;
 import qupath.lib.gui.extensions.QuPathExtension;
 import qupath.lib.gui.prefs.PathPrefs;
 import qupath.lib.gui.tools.MenuTools;
+import qupath.ext.biop.cellpose.backend.CellposeTransport;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -36,6 +38,19 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
 
     private static final Logger logger = LoggerFactory.getLogger(CellposeExtension.class);
     private boolean isInstalled = false;
+
+    // Persistent preference selecting how Cellpose is run for detection: the default external
+    // SUBPROCESS transport, or the opt-in in-process APPOSE transport.
+    private static final ObjectProperty<CellposeTransport> cellposeTransport =
+            PathPrefs.createPersistentPreference("cellposeTransport", CellposeTransport.SUBPROCESS, CellposeTransport.class);
+
+    /**
+     * @return the currently selected detection transport preference (defaults to
+     * {@link CellposeTransport#SUBPROCESS}). A builder-level transport, when set, overrides this.
+     */
+    public static CellposeTransport getTransportPreference() {
+        return cellposeTransport.get();
+    }
 
     private static final LinkedHashMap<String, String> SCRIPTS = new LinkedHashMap<>() {{
         put("Cellpose training script template", "scripts/Cellpose_training_template.groovy");
@@ -117,8 +132,15 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
                 .description("The full path to you conda/mamba command, in case you want the extension to use the 'conda activate' command.\ne.g 'C:\\ProgramData\\Miniconda3\\condabin\\mamba.bat'\nDo not include quotes (\') or double quotes (\") around the path.")
                 .build();
 
+        PropertySheet.Item transportItem = new PropertyItemBuilder<>(cellposeTransport, CellposeTransport.class)
+                .propertyType(PropertyItemBuilder.PropertyType.GENERAL)
+                .name("Cellpose transport")
+                .category("Cellpose/Omnipose")
+                .description("How to run Cellpose for detection:\nSUBPROCESS (default): launch an external Python process (uses the python.exe paths above).\nAPPOSE (experimental): run Cellpose in-process through Appose, building its own Python environment automatically.")
+                .build();
+
         // Add Permanent Preferences and Populate Preferences
-        QuPathGUI.getInstance().getPreferencePane().getPropertySheet().getItems().addAll(cellposePathItem, cellposeSAMPathItem, omniposePathItem, condaPathItem);
+        QuPathGUI.getInstance().getPreferencePane().getPropertySheet().getItems().addAll(cellposePathItem, cellposeSAMPathItem, omniposePathItem, condaPathItem, transportItem);
 
     }
 
