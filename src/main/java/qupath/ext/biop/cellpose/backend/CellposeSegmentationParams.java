@@ -35,6 +35,7 @@ public final class CellposeSegmentationParams {
     private final double cellprobThreshold;
     private final boolean useGpu;
     private final boolean do3D;
+    private final CellposeDevice device;
 
     private CellposeSegmentationParams(Builder builder) {
         this.model = builder.model;
@@ -47,6 +48,7 @@ public final class CellposeSegmentationParams {
         this.cellprobThreshold = builder.cellprobThreshold;
         this.useGpu = builder.useGpu;
         this.do3D = builder.do3D;
+        this.device = builder.device;
     }
 
     /**
@@ -105,6 +107,13 @@ public final class CellposeSegmentationParams {
     }
 
     /**
+     * @return the requested compute device (never null; defaults to {@link CellposeDevice#AUTO})
+     */
+    public CellposeDevice getDevice() {
+        return device;
+    }
+
+    /**
      * @return a new builder
      */
     public static Builder builder() {
@@ -125,6 +134,7 @@ public final class CellposeSegmentationParams {
         private double cellprobThreshold = 0.0;
         private boolean useGpu = true;
         private boolean do3D = false;
+        private CellposeDevice device = CellposeDevice.AUTO;
 
         public Builder model(String model) {
             this.model = model;
@@ -173,6 +183,16 @@ public final class CellposeSegmentationParams {
 
         public Builder do3D(boolean do3D) {
             this.do3D = do3D;
+            return this;
+        }
+
+        /**
+         * @param device the compute device to request; {@code null} is treated as
+         *               {@link CellposeDevice#AUTO}
+         * @return this builder
+         */
+        public Builder device(CellposeDevice device) {
+            this.device = device == null ? CellposeDevice.AUTO : device;
             return this;
         }
 

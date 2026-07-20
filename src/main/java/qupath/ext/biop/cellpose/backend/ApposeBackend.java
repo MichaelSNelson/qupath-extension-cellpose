@@ -28,11 +28,16 @@ import org.apposed.appose.TaskException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import qupath.ext.biop.cellpose.TileFile;
+import qupath.ext.biop.cellpose.ui.PythonConsoleWindow;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
@@ -61,11 +66,20 @@ public class ApposeBackend implements CellposeBackend {
 
     private static final Logger logger = LoggerFactory.getLogger(ApposeBackend.class);
 
+    /**
+     * Live Appose services, so a single JVM shutdown hook can close them if QuPath is force-quit
+     * before {@link #close()} runs, preventing an orphaned Python subprocess. The Python-side
+     * parent-watcher (injected into the init script) is the second line of defence.
+     */
+    private static final Set<Service> LIVE_SERVICES = ConcurrentHashMap.newKeySet();
+    private static final AtomicBoolean SHUTDOWN_HOOK_INSTALLED = new AtomicBoolean(false);
+
     private final Consumer<TileFile> tileReader;
 
     private Service service;
     private String runScript;
     private String initScript;
+    private boolean useGpu;
 
     /**
      * Create an Appose backend.
@@ -75,6 +89,7 @@ public class ApposeBackend implements CellposeBackend {
      */
     public ApposeBackend(Consumer<TileFile> tileReader) {
         this.tileReader = tileReader;
+        installShutdownHook();
     }
 
     @Override
@@ -89,6 +104,12 @@ public class ApposeBackend implements CellposeBackend {
 
         boolean modelInitialized = false;
         for (TileFile tile : tiles) {
+            // Cooperative cancellation: Cellpose's model.eval is a single blocking call that cannot
+            // be interrupted mid-tile, so honor QuPath's Stop between tiles.
+            if (Thread.currentThread().isInterrupted())
+                throw new InterruptedException("Cellpose segmentation cancelled before tile "
+                        + tile.getImageFile().getName());
+
             ImagePlus imp = IJ.openImage(tile.getImageFile().getAbsolutePath());
             if (imp == null) {
                 logger.warn("Could not open tile image {}; skipping", tile.getImageFile());
@@ -97,8 +118,8 @@ public class ApposeBackend implements CellposeBackend {
             int width = imp.getWidth();
             int height = imp.getHeight();
 
-            NDArray input = NDArrays.fromImagePlus(imp);
-            NDArray labels = NDArrays.allocateLabels(width, height);
+            NDArray input = allocate(() -> NDArrays.fromImagePlus(imp));
+            NDArray labels = allocate(() -> NDArrays.allocateLabels(width, height));
             try {
                 Map<String, Object> inputs = buildInputs(params, imp.getStackSize(), input, labels);
 
@@ -113,8 +134,8 @@ public class ApposeBackend implements CellposeBackend {
                 IJ.save(maskImp, tile.getLabelFile().getAbsolutePath());
                 maskImp.close();
             } finally {
-                input.close();
-                labels.close();
+                closeQuietly(input);
+                closeQuietly(labels);
                 imp.close();
             }
 
@@ -126,7 +147,9 @@ public class ApposeBackend implements CellposeBackend {
     private synchronized void ensureService(CellposeSegmentationParams params) throws IOException {
         if (service != null)
             return;
-        String envName = ApposeEnvironments.envName(params.isCellposeSam());
+
+        this.useGpu = ApposeEnvironments.resolveUseGpu(params.getDevice());
+        String envName = ApposeEnvironments.envName(params.isCellposeSam(), useGpu);
         String scriptName = params.isCellposeSam() ? "cp4.py" : "cp3.py";
         String initName = params.isCellposeSam() ? "cp4_init.py" : "cp3_init.py";
 
@@ -134,11 +157,33 @@ public class ApposeBackend implements CellposeBackend {
         this.initScript = ApposeEnvironments.readResource(initName);
         String cpUtils = ApposeEnvironments.readResource("cp_utils.py");
 
-        logger.info("Starting Appose Cellpose service (environment {})", envName);
+        // FIX: pre-import numpy FIRST (a numpy import after the stdin reader starts deadlocks on
+        // Windows), then the parent-watcher, then cp_utils. init() replaces (not appends), so this
+        // is one combined string.
+        String init = "import numpy\n" + parentWatcherSnippet() + cpUtils;
+
+        logger.info("Starting Appose Cellpose service (device={} -> environment {}, use_gpu={})",
+                params.getDevice(), envName, useGpu);
         try {
-            this.service = ApposeEnvironments.getEnvironment().activate(envName).python().init(cpUtils);
+            Service created = ApposeEnvironments.withExtensionClassLoader(() -> {
+                Service svc = ApposeEnvironments.getEnvironment().activate(envName).python();
+                // Route Python diagnostics to the log and the user-visible console (stdout is the
+                // Appose IPC channel, so this is the only way users see tracebacks at runtime).
+                svc.debug(msg -> {
+                    logger.info("[Cellpose Python] {}", msg);
+                    PythonConsoleWindow.appendMessage(msg);
+                });
+                svc.init(init);
+                return svc;
+            });
+            this.service = created;
+            LIVE_SERVICES.add(created);
         } catch (org.apposed.appose.BuildException e) {
             throw new IOException("Failed to activate the Appose environment '" + envName + "'", e);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Failed to start the Appose Cellpose service for environment '" + envName + "'", e);
         }
     }
 
@@ -149,8 +194,8 @@ public class ApposeBackend implements CellposeBackend {
      * shared-memory NDArrays for {@code input}/{@code output_labels}, and {@code null} where the
      * scripts expect Python {@code None}.
      */
-    private static Map<String, Object> buildInputs(CellposeSegmentationParams params, int nChannels,
-                                                   NDArray input, NDArray labels) {
+    private Map<String, Object> buildInputs(CellposeSegmentationParams params, int nChannels,
+                                            NDArray input, NDArray labels) {
         Map<String, Object> inputs = new HashMap<>();
 
         // Images (shared memory).
@@ -173,7 +218,9 @@ public class ApposeBackend implements CellposeBackend {
         inputs.put("use_3D", params.isDo3D());
         inputs.put("flow_threshold", params.getFlowThreshold());
         inputs.put("cellprob_threshold", params.getCellprobThreshold());
-        inputs.put("use_gpu", params.isUseGpu());
+        // Use the resolved device, not the raw builder flag: this stays consistent with the pixi
+        // sub-environment we activated (cpu vs cuNNN).
+        inputs.put("use_gpu", useGpu);
 
         // Fixed defaults for the 2D-tile case (mirroring the script defaults).
         inputs.put("stitch_threshold", 0.0);
@@ -202,36 +249,160 @@ public class ApposeBackend implements CellposeBackend {
     }
 
     private void submit(String script, Map<String, Object> inputs, String description) throws IOException, InterruptedException {
-        Task task = service.task(script, inputs);
-        task.listen(ApposeBackend::relay);
-        task.start();
+        Task task;
         try {
-            task.waitFor();
+            task = ApposeEnvironments.withExtensionClassLoader(() -> {
+                Task t = service.task(script, inputs);
+                t.listen(ApposeBackend::relay);
+                t.start();
+                return t;
+            });
+        } catch (Exception e) {
+            throw new IOException(description + " failed to start: " + e.getMessage(), e);
+        }
+
+        try {
+            ApposeEnvironments.withExtensionClassLoader(() -> {
+                task.waitFor();
+                return null;
+            });
+        } catch (InterruptedException e) {
+            // QuPath asked to stop while this tile was in flight: request cancellation of the task
+            // and propagate so run() halts cleanly. The service is still closed by close().
+            cancelQuietly(task);
+            Thread.currentThread().interrupt();
+            throw e;
         } catch (TaskException e) {
             throw new IOException(description + " failed: " + e.getMessage(), e);
+        } catch (Exception e) {
+            // Any other failure from the classloader-wrapped waitFor (e.g. a runtime error in the
+            // Appose plumbing): surface it as an IOException.
+            throw new IOException(description + " failed: " + e.getMessage(), e);
         }
+
         if (task.status != TaskStatus.COMPLETE) {
             throw new IOException(description + " failed with status " + task.status + ": " + task.error);
         }
     }
 
+    private void cancelQuietly(Task task) {
+        try {
+            ApposeEnvironments.withExtensionClassLoader(() -> {
+                task.cancel();
+                return null;
+            });
+        } catch (Exception e) {
+            logger.debug("Error cancelling Cellpose task: {}", e.getMessage());
+        }
+    }
+
+    /** Allocate an NDArray under the extension classloader (ShmFactory ServiceLoader needs it). */
+    private static NDArray allocate(Callable<NDArray> allocation) throws IOException {
+        try {
+            return ApposeEnvironments.withExtensionClassLoader(allocation);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Failed to allocate a shared-memory array for Cellpose: " + e.getMessage(), e);
+        }
+    }
+
+    private static void closeQuietly(NDArray ndArray) {
+        if (ndArray == null)
+            return;
+        try {
+            ApposeEnvironments.withExtensionClassLoader(() -> {
+                ndArray.close();
+                return null;
+            });
+        } catch (Exception e) {
+            logger.warn("Error closing shared-memory array: {}", e.getMessage(), e);
+        }
+    }
+
     private static void relay(TaskEvent event) {
         if (event.message != null && !event.message.isEmpty()) {
+            String line;
             if (event.maximum > 0)
-                logger.info("Cellpose: {} ({}/{})", event.message, event.current, event.maximum);
+                line = "Cellpose: " + event.message + " (" + event.current + "/" + event.maximum + ")";
             else
-                logger.info("Cellpose: {}", event.message);
+                line = "Cellpose: " + event.message;
+            logger.info(line);
+            PythonConsoleWindow.appendMessage(line);
+        }
+    }
+
+    /**
+     * A small Python daemon, injected into the init script, that watches the parent (QuPath) process
+     * and exits this worker if the parent dies. This prevents an orphaned python.exe if QuPath is
+     * force-quit before the JVM shutdown hook can close the service. On Windows it uses
+     * {@code OpenProcess}, NOT {@code os.kill(pid, 0)} (signal 0 on Windows crashes the target).
+     * Internal names use a leading underscore so the worker does not export them to task scripts.
+     */
+    private static String parentWatcherSnippet() {
+        return String.join("\n",
+                "import os as _os, sys as _sys, threading as _thr, time as _time",
+                "def _watch_parent():",
+                "    _ppid = _os.getppid()",
+                "    _is_win = _sys.platform.startswith('win')",
+                "    _k = None",
+                "    if _is_win:",
+                "        import ctypes as _ct",
+                "        _k = _ct.windll.kernel32",
+                "    while True:",
+                "        _time.sleep(2.0)",
+                "        _alive = True",
+                "        try:",
+                "            if _is_win:",
+                "                _h = _k.OpenProcess(0x1000, False, _ppid)",
+                "                if not _h:",
+                "                    _alive = False",
+                "                else:",
+                "                    _code = _ct.c_ulong(0)",
+                "                    if _k.GetExitCodeProcess(_h, _ct.byref(_code)) and _code.value != 259:",
+                "                        _alive = False",
+                "                    _k.CloseHandle(_h)",
+                "            else:",
+                "                _os.kill(_ppid, 0)",
+                "        except Exception:",
+                "            _alive = False",
+                "        if not _alive:",
+                "            _os._exit(1)",
+                "_thr.Thread(target=_watch_parent, daemon=True).start()",
+                "");
+    }
+
+    private static void installShutdownHook() {
+        if (SHUTDOWN_HOOK_INSTALLED.compareAndSet(false, true)) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                for (Service svc : LIVE_SERVICES) {
+                    try {
+                        svc.close();
+                    } catch (Exception e) {
+                        try {
+                            svc.kill();
+                        } catch (Exception ignore) {
+                            // best effort at JVM shutdown
+                        }
+                    }
+                }
+            }, "cellpose-appose-shutdown"));
         }
     }
 
     @Override
     public void close() {
         if (service != null) {
+            Service closing = service;
             try {
-                service.close();
+                ApposeEnvironments.withExtensionClassLoader(() -> {
+                    closing.close();
+                    return null;
+                });
             } catch (Exception e) {
                 logger.warn("Error closing Appose Cellpose service: {}", e.getMessage(), e);
             } finally {
+                LIVE_SERVICES.remove(closing);
                 service = null;
             }
         }

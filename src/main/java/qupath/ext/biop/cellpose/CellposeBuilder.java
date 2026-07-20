@@ -19,6 +19,7 @@ package qupath.ext.biop.cellpose;
 import com.google.gson.Gson;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.biop.cellpose.backend.CellposeDevice;
 import qupath.ext.biop.cellpose.backend.CellposeTransport;
 import qupath.lib.analysis.features.ObjectMeasurements.Compartments;
 import qupath.lib.analysis.features.ObjectMeasurements.Measurements;
@@ -109,6 +110,8 @@ public class CellposeBuilder {
     private String outputModelName;
     // Detection transport. Null means "use the extension-wide preference" (which defaults to the subprocess transport).
     private CellposeTransport transport = null;
+    // Compute device for the in-process (Appose) transport. Null means "use the extension-wide preference" (defaults to AUTO).
+    private CellposeDevice device = null;
 
     /**
      * can create a cellpose builder from a serialized JSON version of this builder.
@@ -692,6 +695,20 @@ public class CellposeBuilder {
     }
 
     /**
+     * Select the compute device for the in-process ({@link CellposeTransport#APPOSE}) transport:
+     * {@link CellposeDevice#AUTO} (detect a GPU), {@link CellposeDevice#GPU} (force the CUDA
+     * environment), or {@link CellposeDevice#CPU} (force the CPU environment). When set, this
+     * overrides the extension-wide device preference. Ignored by the subprocess transport.
+     *
+     * @param device the device to use
+     * @return this builder
+     */
+    public CellposeBuilder device(CellposeDevice device) {
+        this.device = device;
+        return this;
+    }
+
+    /**
      * Exclude on edges. Adds --exclude_on_edges flag to CellPose command.
      * It has a higher priority level than {@link CellposeBuilder#constrainToParent(boolean)}
      *
@@ -951,6 +968,7 @@ public class CellposeBuilder {
         cellpose.doReadResultsAsynchronously = this.doReadResultsAsynchronously;
         cellpose.useCellposeSAM = this.useCellposeSAM;
         cellpose.transport = this.transport;
+        cellpose.device = this.device;
         cellpose.extendChannelOp = this.extendChannelOp;
 
         if(this.excludeEdges) {

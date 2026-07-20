@@ -13,7 +13,9 @@ import qupath.lib.gui.extensions.GitHubProject;
 import qupath.lib.gui.extensions.QuPathExtension;
 import qupath.lib.gui.prefs.PathPrefs;
 import qupath.lib.gui.tools.MenuTools;
+import qupath.ext.biop.cellpose.backend.CellposeDevice;
 import qupath.ext.biop.cellpose.backend.CellposeTransport;
+import qupath.ext.biop.cellpose.ui.PythonConsoleWindow;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -50,6 +52,19 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
      */
     public static CellposeTransport getTransportPreference() {
         return cellposeTransport.get();
+    }
+
+    // Persistent preference selecting the compute device for the in-process (Appose) transport:
+    // AUTO detects a GPU, GPU forces the CUDA environment, CPU forces the CPU environment.
+    private static final ObjectProperty<CellposeDevice> cellposeApposeDevice =
+            PathPrefs.createPersistentPreference("cellposeApposeDevice", CellposeDevice.AUTO, CellposeDevice.class);
+
+    /**
+     * @return the currently selected Appose compute-device preference (defaults to
+     * {@link CellposeDevice#AUTO}). A builder-level device, when set, overrides this.
+     */
+    public static CellposeDevice getDevicePreference() {
+        return cellposeApposeDevice.get();
     }
 
     private static final LinkedHashMap<String, String> SCRIPTS = new LinkedHashMap<>() {{
@@ -139,8 +154,21 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
                 .description("How to run Cellpose for detection:\nSUBPROCESS (default): launch an external Python process (uses the python.exe paths above).\nAPPOSE (experimental): run Cellpose in-process through Appose, building its own Python environment automatically.")
                 .build();
 
+        PropertySheet.Item deviceItem = new PropertyItemBuilder<>(cellposeApposeDevice, CellposeDevice.class)
+                .propertyType(PropertyItemBuilder.PropertyType.GENERAL)
+                .name("Cellpose Appose device")
+                .category("Cellpose/Omnipose")
+                .description("Compute device for the in-process (Appose) transport:\nAUTO (default): detect an NVIDIA GPU and use it if present, otherwise CPU.\nGPU: force the CUDA environment.\nCPU: force the CPU environment.")
+                .build();
+
         // Add Permanent Preferences and Populate Preferences
-        QuPathGUI.getInstance().getPreferencePane().getPropertySheet().getItems().addAll(cellposePathItem, cellposeSAMPathItem, omniposePathItem, condaPathItem, transportItem);
+        QuPathGUI.getInstance().getPreferencePane().getPropertySheet().getItems().addAll(cellposePathItem, cellposeSAMPathItem, omniposePathItem, condaPathItem, transportItem, deviceItem);
+
+        // Add a menu item to open the Python console, which surfaces the in-process backend's
+        // Python diagnostics (the Appose IPC channel reserves stdout, so this is the only runtime view).
+        MenuTools.addMenuItems(
+                qupath.getMenu("Extensions>Cellpose", true),
+                new Action("Python console", e -> PythonConsoleWindow.show()));
 
     }
 

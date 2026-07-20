@@ -78,4 +78,22 @@ public interface CellposeBackend extends AutoCloseable {
             return preference;
         return CellposeTransport.SUBPROCESS;
     }
+
+    /**
+     * Resolve which compute device the in-process backend should target, given an optional
+     * builder-level override and the extension-wide preference. A non-null builder value always
+     * wins; otherwise the preference is used; if both are null, {@link CellposeDevice#AUTO} is
+     * returned.
+     *
+     * @param builderDevice the device set on the builder, or null if unset
+     * @param preference    the extension-wide preference, or null
+     * @return the resolved device (never null)
+     */
+    static CellposeDevice resolveDevice(CellposeDevice builderDevice, CellposeDevice preference) {
+        if (builderDevice != null)
+            return builderDevice;
+        if (preference != null)
+            return preference;
+        return CellposeDevice.AUTO;
+    }
 }

@@ -42,6 +42,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import qupath.ext.biop.cellpose.backend.ApposeBackend;
 import qupath.ext.biop.cellpose.backend.CellposeBackend;
+import qupath.ext.biop.cellpose.backend.CellposeDevice;
 import qupath.ext.biop.cellpose.backend.CellposeSegmentationParams;
 import qupath.ext.biop.cellpose.backend.CellposeTransport;
 import qupath.ext.biop.cellpose.backend.SubprocessBackend;
@@ -180,6 +181,8 @@ public class Cellpose2D {
     protected boolean useCellposeSAM;
     // Chosen transport for detection. Null means "fall back to the extension preference".
     protected CellposeTransport transport;
+    // Chosen Appose compute device. Null means "fall back to the extension preference" (AUTO).
+    protected CellposeDevice device;
     File tempDirectory;
     private List<String> theLog;
     private ResultsTable trainingResults;
@@ -868,9 +871,16 @@ public class Cellpose2D {
      * @return the segmentation parameters
      */
     private CellposeSegmentationParams buildSegmentationParams() {
+        // Resolve the device: an explicit builder device wins; otherwise the legacy disableGPU flag
+        // forces CPU; otherwise the extension-wide preference (AUTO by default) applies.
+        CellposeDevice resolvedDevice = CellposeBackend.resolveDevice(this.device, CellposeExtension.getDevicePreference());
+        if (this.device == null && this.disableGPU)
+            resolvedDevice = CellposeDevice.CPU;
+
         CellposeSegmentationParams.Builder builder = CellposeSegmentationParams.builder()
                 .cellposeSam(this.useCellposeSAM)
                 .useGpu(!this.disableGPU)
+                .device(resolvedDevice)
                 .model(this.model)
                 .customModel(new File(this.model).exists());
 
