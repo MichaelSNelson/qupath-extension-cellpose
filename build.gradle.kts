@@ -5,7 +5,7 @@ plugins {
     // Bundle the extension + its non-QuPath runtime dependencies into a single -all.jar so users
     // install ONE file instead of a handful of loose dependency jars. Appose also REQUIRES a shaded
     // jar with merged service files (see shadowJar config below), or its ServiceLoader lookups fail.
-    id("com.gradleup.shadow") version "8.3.6"
+    id("com.gradleup.shadow") version "9.6.0"
 }
 
 qupathExtension {
@@ -53,6 +53,13 @@ tasks.withType<Test> {
 tasks.shadowJar {
     mergeServiceFiles()
     exclude("module-info.class")
+    // Relocate Appose so this extension's copy cannot collide with another installed QuPath
+    // extension that bundles a DIFFERENT Appose version. Multiple extensions each ship Appose, and
+    // QuPath loads them into a shared space; without relocation an older Appose (e.g. one lacking
+    // Environment.activate(String)) can win the classloader race and break us with NoSuchMethodError.
+    // Only the Java package is renamed; the vendored Python scripts (a different resource path) and
+    // the Appose<->Python wire protocol are unaffected.
+    relocate("org.apposed.appose", "qupath.ext.biop.cellpose.thirdparty.appose")
     // Allowlist: bundle ONLY the Appose stack we added, not QuPath's whole transitive tree
     // (ImageJ, OpenCV, JTS, JavaFX, Groovy-core, ...), all of which the QuPath runtime provides.
     dependencies {
