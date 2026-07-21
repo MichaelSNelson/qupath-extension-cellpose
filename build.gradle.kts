@@ -2,6 +2,10 @@ plugins {
     id("maven-publish")
     // QuPath Gradle extension convention plugin
     id("qupath-conventions")
+    // Bundle the extension + its non-QuPath runtime dependencies into a single -all.jar so users
+    // install ONE file instead of a handful of loose dependency jars. Appose also REQUIRES a shaded
+    // jar with merged service files (see shadowJar config below), or its ServiceLoader lookups fail.
+    id("com.gradleup.shadow") version "8.3.6"
 }
 
 qupathExtension {
@@ -37,6 +41,31 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+}
+
+/*
+ * Single self-contained jar (build/libs/qupath-extension-cellpose-<ver>-all.jar).
+ * mergeServiceFiles() is REQUIRED: Appose ships four ServiceLoader interfaces (Scheme,
+ * BuilderFactory, ScriptSyntax, ShmFactory) whose META-INF/services entries must survive the
+ * merge, or NDArray allocation and JSON encoding fail at runtime. QuPath, JavaFX and Groovy-core
+ * are provided by the QuPath runtime, so they are excluded to avoid a second, conflicting copy.
+ */
+tasks.shadowJar {
+    mergeServiceFiles()
+    exclude("module-info.class")
+    // Allowlist: bundle ONLY the Appose stack we added, not QuPath's whole transitive tree
+    // (ImageJ, OpenCV, JTS, JavaFX, Groovy-core, ...), all of which the QuPath runtime provides.
+    dependencies {
+        include(dependency("org.apposed:appose"))
+        include(dependency("net.java.dev.jna:jna"))
+        include(dependency("net.java.dev.jna:jna-platform"))
+        include(dependency("org.apache.ivy:ivy"))
+        include(dependency("org.apache.commons:commons-compress"))
+        include(dependency("org.apache.commons:commons-lang3"))
+        include(dependency("commons-codec:commons-codec"))
+        include(dependency("commons-io:commons-io"))
+        include(dependency("org.apache.groovy:groovy-json")) // NOT groovy-core (QuPath ships it)
+    }
 }
 
 /*

@@ -168,10 +168,15 @@ public class ApposeBackend implements CellposeBackend {
             Service created = ApposeEnvironments.withExtensionClassLoader(() -> {
                 Service svc = ApposeEnvironments.getEnvironment().activate(envName).python();
                 // Route Python diagnostics to the log and the user-visible console (stdout is the
-                // Appose IPC channel, so this is the only way users see tracebacks at runtime).
+                // Appose IPC channel, so this is the only way users see tracebacks at runtime). The
+                // debug channel carries the full IPC protocol -- including the entire task script,
+                // license header and all, on every call -- which is dev-only noise. Keep the raw
+                // stream in the log at debug level, but show the console only human-readable lines
+                // (Python warnings/tracebacks and failures), not the routine request/response JSON.
                 svc.debug(msg -> {
-                    logger.info("[Cellpose Python] {}", msg);
-                    PythonConsoleWindow.appendMessage(msg);
+                    logger.debug("[Cellpose Python] {}", msg);
+                    if (isConsoleWorthy(msg))
+                        PythonConsoleWindow.appendMessage(msg);
                 });
                 svc.init(init);
                 return svc;
@@ -330,6 +335,27 @@ public class ApposeBackend implements CellposeBackend {
             logger.info(line);
             PythonConsoleWindow.appendMessage(line);
         }
+    }
+
+    /**
+     * Decide whether a raw Appose debug line belongs in the user-facing Python console. The debug
+     * channel carries the whole IPC protocol: routine task request/response JSON that embeds the
+     * entire task script (and its BSD-3 license header) on every call. That is dev-only noise, so we
+     * drop it -- but we keep everything human-readable (Python {@code [WORKER-*]} warnings and
+     * tracebacks, pixi output, plain text) and any protocol line that reports a failure/error, so
+     * runtime problems still surface. Scripted progress arrives separately via {@link #relay}.
+     */
+    private static boolean isConsoleWorthy(String msg) {
+        if (msg == null || msg.isBlank())
+            return false;
+        String t = msg.strip();
+        boolean protocolJson = t.indexOf('{') >= 0
+                && (t.contains("\"requestType\"") || t.contains("\"responseType\"") || t.contains("\"script\""));
+        if (!protocolJson)
+            return true;
+        String lower = t.toLowerCase();
+        return lower.contains("failure") || lower.contains("\"error\"")
+                || lower.contains("traceback") || lower.contains("exception");
     }
 
     /**
