@@ -98,7 +98,7 @@ final class ApposeEnvironments {
                 if (firstBuild)
                     warnFirstRun();
 
-                environment = buildEnvironment(pixiToml, envDir);
+                environment = buildEnvironment(pixiToml, envDir, firstBuild);
             }
             return environment;
         }
@@ -110,8 +110,18 @@ final class ApposeEnvironments {
      * lock format) the staged lock is deleted and the build retried once, resolving fresh. A Windows
      * file lock is surfaced with manual recovery steps and never auto-wiped.
      */
-    private static Environment buildEnvironment(String pixiToml, Path envDir) throws IOException {
-        logger.info("Building Appose (pixi) environment for Cellpose; first run may take a while");
+    private static Environment buildEnvironment(String pixiToml, Path envDir, boolean firstBuild) throws IOException {
+        if (firstBuild) {
+            String bar = "*".repeat(78);
+            logger.info(bar);
+            logger.info("**  BUILDING THE CELLPOSE PYTHON ENVIRONMENT (first run only)");
+            logger.info("**  Downloading a multi-GB PyTorch/Cellpose environment. This can take");
+            logger.info("**  SEVERAL MINUTES. QuPath is NOT frozen -- watch progress in");
+            logger.info("**  Extensions > Cellpose > Python console.");
+            logger.info(bar);
+        } else {
+            logger.info("Preparing the Cellpose Appose environment...");
+        }
         try {
             return runBuild(pixiToml);
         } catch (BuildException e) {
