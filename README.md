@@ -167,6 +167,27 @@ and you can then use it within the QuPath Extension Cellpose.
 
 # Using the Cellpose QuPath Extension
 
+## In-process (Appose) backend (preview)
+
+This branch adds an **opt-in** alternative transport that runs Cellpose *in-process* through
+[Appose](https://github.com/apposed/appose) instead of the default subprocess + disk round-trip.
+Tiles are handed to Python in shared memory and the label masks come straight back, which avoids
+the per-tile TIFF write/read. It also **self-builds its own Python environment** (via `pixi`) on
+first use, so no manual Cellpose/conda install is required for the Appose path.
+
+It is **off by default** and changes nothing about the existing subprocess workflow. To try it:
+
+1. Install the extension jar from the release attached to this branch.
+2. `Edit > Preferences > Cellpose`: set **Cellpose transport** to `APPOSE` (optionally set
+   **Cellpose Appose device** to `AUTO`/`GPU`/`CPU`).
+3. Run the normal detection script. The **first run downloads a multi-GB environment** (watch
+   `Extensions > Cellpose > Python console`); later runs reuse it.
+
+Everything downstream of segmentation (candidate extraction, measurements, `PathObject`
+construction) is untouched. Design and provenance notes are in [`NOTICE`](NOTICE). This is a
+clean-room, Apache-2.0 implementation; the vendored Python scripts are BSD-3-Clause from
+[imglib2-cellpose](https://github.com/Image-Analysis-Hub/imglib2-cellpose) (attributed in `NOTICE`).
+
 ## Prediction 
 
 Running Cellpose is done via a script and is very similar to the excellent [QuPath StarDist Extension](https://github.com/qupath/qupath-extension-stardist)
