@@ -188,6 +188,28 @@ construction) is untouched. Design and provenance notes are in [`NOTICE`](NOTICE
 clean-room, Apache-2.0 implementation; the vendored Python scripts are BSD-3-Clause from
 [imglib2-cellpose](https://github.com/Image-Analysis-Hub/imglib2-cellpose) (attributed in `NOTICE`).
 
+### Scope: what the Appose transport does and does not touch
+
+The transport preference affects **detection/prediction only**. Model **training**, the
+validation/QC labelling, and the QC metrics notebook always run through the conventional
+**subprocess** Cellpose install, regardless of the transport setting. Two consequences:
+
+- The Appose self-built environment is **not** used for training. If you want to train a custom
+  model you must still configure a normal Cellpose Python interpreter under
+  `Edit > Preferences > Cellpose`, exactly as before -- an Appose-only setup can detect but cannot
+  train.
+- Selecting `APPOSE` cannot change training/QC behaviour. This isolation is locked by a regression
+  test (`TrainingTransportIsolationTest`).
+
+### Testing status
+
+- **Detection via the Appose transport:** tested on Windows + CUDA and on Linux with Cellpose 3
+  and Cellpose-SAM/4 models.
+- **Training / validation / QC:** **not yet tested end-to-end against this change.** These paths
+  are unchanged by design and provably do not go through the Appose backend (see above), but they
+  have not been re-run on a real training environment as part of this work. End-to-end training
+  verification is still owed before relying on it.
+
 ## Prediction 
 
 Running Cellpose is done via a script and is very similar to the excellent [QuPath StarDist Extension](https://github.com/qupath/qupath-extension-stardist)

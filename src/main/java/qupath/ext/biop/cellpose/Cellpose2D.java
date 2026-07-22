@@ -864,6 +864,23 @@ public class Cellpose2D {
     }
 
     /**
+     * Create the backend used by the training-support paths (currently the validation-image
+     * inference that produces QC labels). Unlike {@link #createDetectionBackend()}, this
+     * <b>always</b> uses the external subprocess transport and never consults the detection
+     * transport preference or builder flag: the in-process (Appose) path implements inference
+     * only -- it has no training or validation entry point -- so training and its QC always run
+     * through the conventional subprocess Cellpose install configured in Preferences. Kept as an
+     * explicit, package-private mirror of {@link #createDetectionBackend()} so this isolation is
+     * unit-testable and cannot silently regress if the training code is refactored.
+     *
+     * @return a subprocess backend for training-support Cellpose runs (no result reader attached)
+     */
+    CellposeBackend createTrainingSupportBackend() {
+        return new SubprocessBackend(this.tempDirectory, this.parameters, this.model, this.disableGPU,
+                this.doReadResultsAsynchronously, this::getVirtualEnvironmentRunner, null);
+    }
+
+    /**
      * Distill the Cellpose flag map into a {@link CellposeSegmentationParams} value object for the
      * in-process backend. The external subprocess backend does not use this (it builds its command
      * from the raw flag map).
@@ -1001,8 +1018,7 @@ public class Cellpose2D {
         try {
             // Validation runs Cellpose only (no result reading), always through the subprocess
             // transport, so the QC path is unaffected by the detection transport preference.
-            CellposeBackend backend = new SubprocessBackend(this.tempDirectory, this.parameters, this.model,
-                    this.disableGPU, this.doReadResultsAsynchronously, this::getVirtualEnvironmentRunner, null);
+            CellposeBackend backend = createTrainingSupportBackend();
             backend.run(null, null);
         } catch (InterruptedException | IOException e) {
             logger.error(e.getMessage(), e);
