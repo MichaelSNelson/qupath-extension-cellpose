@@ -97,6 +97,72 @@ final class NDArrays {
     }
 
     /**
+     * Convert selected slices of an {@link ImagePlus} to an input {@link NDArray}, packed compactly:
+     * shape (height, width) for a single band, or (bands, height, width) otherwise, in C order.
+     * <p>
+     * Packing the chosen channels compactly -- rather than sending the whole stack and asking
+     * Cellpose to index into it -- keeps the array within the channel count Cellpose can interpret.
+     *
+     * @param imp   the image
+     * @param bands 0-based slice indices to include, in the order Cellpose should see them
+     * @return a freshly allocated NDArray; the caller must close it
+     */
+    static NDArray fromImagePlusChannels(ImagePlus imp, int[] bands) {
+        int width = imp.getWidth();
+        int height = imp.getHeight();
+        ImageStack stack = imp.getStack();
+
+        DType dType = dTypeFor(stack.getProcessor(1));
+        Shape shape = bands.length == 1
+                ? new Shape(Order.C_ORDER, height, width)
+                : new Shape(Order.C_ORDER, bands.length, height, width);
+
+        NDArray ndArray = new NDArray(dType, shape);
+        ByteBuffer buffer = ndArray.buffer().order(ByteOrder.nativeOrder());
+        buffer.rewind();
+        for (int band : bands) {
+            writeProcessor(stack.getProcessor(band + 1), buffer, dType);
+        }
+        return ndArray;
+    }
+
+    /**
+     * Average every slice of an {@link ImagePlus} into a single FLOAT32 plane of shape
+     * (height, width) in C order.
+     * <p>
+     * This reproduces, on the Java side, what Cellpose does for the grayscale channel spec
+     * {@code [0, 0]} (it averages the channel axis). Doing it here means Cellpose is handed a plain
+     * 2D plane: above three channels it otherwise mistakes the channel axis for a Z axis -- logging
+     * {@code "z_axis not specified, assuming it is dim 0"} and returning an empty mask -- even when
+     * {@code channel_axis} is passed explicitly. FLOAT32 keeps the mean exact for integer inputs.
+     *
+     * @param imp the image
+     * @return a freshly allocated NDArray; the caller must close it
+     */
+    static NDArray meanOfChannels(ImagePlus imp) {
+        int width = imp.getWidth();
+        int height = imp.getHeight();
+        ImageStack stack = imp.getStack();
+        int nChannels = stack.getSize();
+
+        NDArray ndArray = new NDArray(DType.FLOAT32, new Shape(Order.C_ORDER, height, width));
+        ByteBuffer buffer = ndArray.buffer().order(ByteOrder.nativeOrder());
+        buffer.rewind();
+        ImageProcessor[] processors = new ImageProcessor[nChannels];
+        for (int c = 0; c < nChannels; c++)
+            processors[c] = stack.getProcessor(c + 1);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                double sum = 0;
+                for (ImageProcessor ip : processors)
+                    sum += ip.getf(x, y);
+                buffer.putFloat((float) (sum / nChannels));
+            }
+        }
+        return ndArray;
+    }
+
+    /**
      * Convert a single ImageJ {@link ImageProcessor} to a 2D input {@link NDArray} of shape
      * (height, width) in C order.
      *

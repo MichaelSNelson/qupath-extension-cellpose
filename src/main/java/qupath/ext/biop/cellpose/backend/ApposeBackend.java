@@ -31,6 +31,7 @@ import qupath.ext.biop.cellpose.TileFile;
 import qupath.ext.biop.cellpose.ui.PythonConsoleWindow;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +66,13 @@ import java.util.function.Consumer;
 public class ApposeBackend implements CellposeBackend {
 
     private static final Logger logger = LoggerFactory.getLogger(ApposeBackend.class);
+
+    /** Attempts for the transient Appose worker "thread death" (see {@link #submit}). */
+    private static final int THREAD_DEATH_ATTEMPTS = 3;
+    private static final long THREAD_DEATH_RETRY_DELAY_MS = 500L;
+
+    /** Cellpose-SAM (Cellpose 4) accepts at most three channels. */
+    private static final int CELLPOSE_SAM_MAX_CHANNELS = 3;
 
     /**
      * Live Appose services, so a single JVM shutdown hook can close them if QuPath is force-quit
@@ -118,10 +126,16 @@ public class ApposeBackend implements CellposeBackend {
             int width = imp.getWidth();
             int height = imp.getHeight();
 
-            NDArray input = allocate(() -> NDArrays.fromImagePlus(imp));
+            // Cellpose 3 gets a compacted array holding only the channels it will use (see
+            // Cp3Layout); Cellpose 4 gets the whole stack, because cp4.py does its own slicing.
+            Cp3Layout layout = params.isCellposeSam()
+                    ? null
+                    : Cp3Layout.resolve(params.getChannel1(), params.getChannel2(), imp.getStackSize());
+
+            NDArray input = allocate(() -> layout == null ? NDArrays.fromImagePlus(imp) : layout.pack(imp));
             NDArray labels = allocate(() -> NDArrays.allocateLabels(width, height));
             try {
-                Map<String, Object> inputs = buildInputs(params, imp.getStackSize(), input, labels);
+                Map<String, Object> inputs = buildInputs(params, imp.getStackSize(), layout, input, labels);
 
                 if (!modelInitialized) {
                     submit(initScript, inputs, "Initializing Cellpose model");
@@ -200,7 +214,7 @@ public class ApposeBackend implements CellposeBackend {
      * scripts expect Python {@code None}.
      */
     private Map<String, Object> buildInputs(CellposeSegmentationParams params, int nChannels,
-                                            NDArray input, NDArray labels) {
+                                            Cp3Layout layout, NDArray input, NDArray labels) {
         Map<String, Object> inputs = new HashMap<>();
 
         // Images (shared memory).
@@ -208,10 +222,13 @@ public class ApposeBackend implements CellposeBackend {
         inputs.put("output_labels", labels);
         inputs.put("output_flows", null);
 
-        // Axes: 2D tiles, so no Z or T. Channel axis is 0 when we send a (C, Y, X) stack.
+        // Axes: 2D tiles, so no Z or T. Channel axis is 0 when we send a (C, Y, X) stack -- which
+        // for Cellpose 3 depends on how many channels the layout actually packed, not on how many
+        // the tile has.
         inputs.put("t_axis", null);
         inputs.put("z_axis", null);
-        inputs.put("channel_axis", nChannels > 1 ? Integer.valueOf(0) : null);
+        int sentChannels = layout == null ? nChannels : layout.packedChannels();
+        inputs.put("channel_axis", sentChannels > 1 ? Integer.valueOf(0) : null);
 
         // Model selection.
         boolean custom = params.isCustomModel();
@@ -239,21 +256,196 @@ public class ApposeBackend implements CellposeBackend {
         inputs.put("niter", null);
 
         if (params.isCellposeSam()) {
-            // Cellpose 4 (cp4.py) channel handling.
+            // Cellpose 4 (cp4.py) channel handling. cp4.py slices the channel axis DIRECTLY
+            // (input_image[..., channels, :, :]), so its chan0/chan1/chan2 are 0-based array
+            // indices -- NOT cellpose's --chan/--chan2 convention, which is what the builder's
+            // cellposeChannels(...) carries. Translate before sending; see resolveCp4Channels.
             inputs.put("n_channels", nChannels);
-            inputs.put("chan0", params.getChannel1());
-            inputs.put("chan1", params.getChannel2());
-            inputs.put("chan2", null);
+            int[] indices = resolveCp4Channels(params.getChannel1(), params.getChannel2(), nChannels);
+            inputs.put("chan0", indices.length > 0 ? Integer.valueOf(indices[0]) : null);
+            inputs.put("chan1", indices.length > 1 ? Integer.valueOf(indices[1]) : null);
+            inputs.put("chan2", indices.length > 2 ? Integer.valueOf(indices[2]) : null);
         } else {
-            // Cellpose 3 (cp3.py) channel handling.
-            inputs.put("cell_channel", params.getChannel1());
-            inputs.put("nuclei_channel", params.getChannel2());
+            // Cellpose 3 (cp3.py) channel handling: cp3.py passes these straight to model.eval as
+            // `channels`, which IS the --chan/--chan2 convention. Because the layout has already
+            // packed the tile down to just the channels in use, the spec refers to positions in
+            // that packed array, not in the original tile.
+            inputs.put("cell_channel", layout.cellChannel());
+            inputs.put("nuclei_channel", layout.nucleiChannel());
         }
 
         return inputs;
     }
 
+    /**
+     * Translate cellpose's {@code --chan}/{@code --chan2} channel numbers into the 0-based channel
+     * indices that {@code cp4.py} uses to slice the tile.
+     * <p>
+     * The two conventions differ and must not be conflated:
+     * <ul>
+     *     <li>{@code --chan}/{@code --chan2} (what {@code CellposeBuilder.cellposeChannels(a, b)}
+     *     sets) are 1-based, with {@code 0} meaning "grayscale / not specified";</li>
+     *     <li>{@code cp4.py} does {@code input_image[..., channels, :, :]}, so its values are plain
+     *     0-based indices into the exported tile's channel axis.</li>
+     * </ul>
+     * Passing the former as the latter both shifts every channel by one and puts
+     * {@code cellposeChannels(1, 2)} out of bounds on a two-channel tile.
+     * <p>
+     * When no channel is specified (the default, and what every shipped example script does), all
+     * exported channels are used -- matching the subprocess backend, which hands Cellpose-SAM the
+     * whole tile. Cellpose-SAM accepts at most three channels, so a wider tile is truncated with a
+     * warning rather than failing.
+     *
+     * @param chan      the {@code --chan} value, or null if unset
+     * @param chan2     the {@code --chan2} value, or null if unset
+     * @param nChannels the number of channels in the exported tile
+     * @return the 0-based channel indices to send as {@code chan0}/{@code chan1}/{@code chan2}
+     * @throws IllegalArgumentException if a requested channel does not exist in the tile
+     */
+    static int[] resolveCp4Channels(Integer chan, Integer chan2, int nChannels) {
+        List<Integer> requested = new ArrayList<>();
+        for (Integer value : new Integer[] {chan, chan2}) {
+            // 0 means "grayscale/unspecified" in the cellpose convention, so it selects nothing here.
+            if (value == null || value == 0)
+                continue;
+            int index = value - 1;
+            if (index >= nChannels)
+                throw new IllegalArgumentException(channelOutOfRangeMessage(chan, chan2, value, nChannels));
+            if (!requested.contains(index))
+                requested.add(index);
+        }
+
+        if (requested.isEmpty()) {
+            // Nothing specified: use the whole tile, as the subprocess backend does.
+            int used = Math.min(nChannels, CELLPOSE_SAM_MAX_CHANNELS);
+            if (used < nChannels)
+                logger.warn("Cellpose-SAM accepts at most {} channels; using the first {} of the {} exported channels. "
+                        + "Use .channels(...) to export fewer channels, or cellposeChannels(...) to choose explicitly.",
+                        CELLPOSE_SAM_MAX_CHANNELS, used, nChannels);
+            int[] all = new int[used];
+            for (int i = 0; i < used; i++)
+                all[i] = i;
+            return all;
+        }
+
+        int[] indices = new int[requested.size()];
+        for (int i = 0; i < indices.length; i++)
+            indices[i] = requested.get(i);
+        return indices;
+    }
+
+    /**
+     * How a tile's channels are packed for Cellpose 3, together with the cellpose channel spec that
+     * describes the packed array.
+     * <p>
+     * Cellpose is handed only the channels it will actually use. Sending the whole stack and letting
+     * Cellpose pick fails above three channels: it mistakes the channel axis for a Z axis -- logging
+     * {@code "z_axis not specified, assuming it is dim 0"} -- and returns an empty mask with no
+     * error, even when {@code channel_axis} is passed. Packing here also means the spec is a fixed
+     * {@code [0, 0]} or {@code [1, 2]} regardless of which channels of the tile were requested.
+     * <p>
+     * The grayscale case is averaged rather than truncated, because that is what Cellpose itself
+     * does for the {@code [0, 0]} spec, so results are unchanged for tiles it already handled.
+     *
+     * @param bands         0-based slice indices to send, in order, or null to average all channels
+     * @param cellChannel   the cellpose {@code --chan} value describing the packed array
+     * @param nucleiChannel the cellpose {@code --chan2} value describing the packed array, or null
+     */
+    record Cp3Layout(int[] bands, Integer cellChannel, Integer nucleiChannel) {
+
+        /** Number of channels actually sent to Python (1 means a plain 2D plane). */
+        int packedChannels() {
+            return bands == null ? 1 : bands.length;
+        }
+
+        /** Build the input NDArray for this layout. The caller must close it. */
+        NDArray pack(ImagePlus imp) {
+            return bands == null ? NDArrays.meanOfChannels(imp) : NDArrays.fromImagePlusChannels(imp, bands);
+        }
+
+        /**
+         * Work out the packing for a tile from the builder's cellpose channel numbers.
+         *
+         * @param chan      the {@code --chan} value, or null if unset
+         * @param chan2     the {@code --chan2} value, or null if unset
+         * @param nChannels the number of channels in the exported tile
+         * @return the layout to use
+         * @throws IllegalArgumentException if a requested channel does not exist in the tile
+         */
+        static Cp3Layout resolve(Integer chan, Integer chan2, int nChannels) {
+            List<Integer> requested = new ArrayList<>();
+            for (Integer value : new Integer[] {chan, chan2}) {
+                // 0 means "grayscale/unspecified" in the cellpose convention, so it selects nothing.
+                if (value == null || value == 0)
+                    continue;
+                if (value > nChannels)
+                    throw new IllegalArgumentException(channelOutOfRangeMessage(chan, chan2, value, nChannels));
+                if (!requested.contains(value - 1))
+                    requested.add(value - 1);
+            }
+
+            if (requested.isEmpty()) {
+                // Grayscale over the whole tile. A single-channel tile needs no averaging, so send
+                // it untouched and keep its original pixel type.
+                return nChannels == 1
+                        ? new Cp3Layout(new int[] {0}, 0, null)
+                        : new Cp3Layout(null, 0, null);
+            }
+            if (requested.size() == 1)
+                return new Cp3Layout(new int[] {requested.get(0)}, 0, null);
+            return new Cp3Layout(new int[] {requested.get(0), requested.get(1)}, 1, 2);
+        }
+    }
+
+    private static String channelOutOfRangeMessage(Integer chan, Integer chan2, int value, int nChannels) {
+        return String.format(
+                "cellposeChannels(%s, %s) asks for channel %d, but the exported tile only has %d channel(s). "
+                        + "These values are cellpose's --chan/--chan2 (1-based, 0 = grayscale) and must refer to "
+                        + "channels selected by .channels(...) in the builder.",
+                chan, chan2, value, nChannels);
+    }
+
+    /**
+     * Submit one script to the worker, retrying the documented Appose "thread death" flake.
+     * <p>
+     * Appose occasionally reports {@code Task failed: thread death} when a worker task thread dies
+     * before it reports completion, most often on the first task after a service starts. It is
+     * transient and a plain re-submit succeeds. Our tasks are idempotent -- model init just rebuilds
+     * the model, and a segmentation task overwrites the shared-memory label buffer -- so retrying is
+     * safe. Only this specific failure is retried; a genuine Python error is surfaced immediately.
+     */
     private void submit(String script, Map<String, Object> inputs, String description) throws IOException, InterruptedException {
+        IOException last = null;
+        for (int attempt = 1; attempt <= THREAD_DEATH_ATTEMPTS; attempt++) {
+            try {
+                submitOnce(script, inputs, description);
+                return;
+            } catch (IOException e) {
+                if (!isThreadDeath(e))
+                    throw e;
+                last = e;
+                if (attempt < THREAD_DEATH_ATTEMPTS) {
+                    logger.warn("{}: Appose reported worker thread death (attempt {} of {}); retrying",
+                            description, attempt, THREAD_DEATH_ATTEMPTS);
+                    Thread.sleep(THREAD_DEATH_RETRY_DELAY_MS * attempt);
+                }
+            }
+        }
+        throw new IOException(description + " failed after " + THREAD_DEATH_ATTEMPTS
+                + " attempts: Appose worker thread died each time", last);
+    }
+
+    /** True if this failure is the transient Appose worker "thread death", not a Python error. */
+    private static boolean isThreadDeath(Throwable t) {
+        for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+            String message = cause.getMessage();
+            if (message != null && message.toLowerCase().contains("thread death"))
+                return true;
+        }
+        return false;
+    }
+
+    private void submitOnce(String script, Map<String, Object> inputs, String description) throws IOException, InterruptedException {
         Task task;
         try {
             task = ApposeEnvironments.withExtensionClassLoader(() -> {

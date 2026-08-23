@@ -201,10 +201,30 @@ validation/QC labelling, and the QC metrics notebook always run through the conv
 - Selecting `APPOSE` cannot change training/QC behaviour. This isolation is locked by a regression
   test (`TrainingTransportIsolationTest`).
 
+### Channels
+
+The Appose transport reads the same builder settings as the subprocess one: `.channels(...)`
+selects which image channels are exported into each tile, and `cellposeChannels(chan, chan2)`
+(cellpose's `--chan`/`--chan2`: 1-based, `0` meaning grayscale) picks which of those Cellpose
+should treat as cytoplasm and nucleus. With `cellposeChannels(...)` left unset -- as in every
+shipped example script -- Cellpose 3 works on the grayscale average of the exported channels and
+Cellpose-SAM on all of them, matching the subprocess behaviour.
+
+Tiles are packed down to just those channels before being handed to Python. This matters above
+three channels: Cellpose otherwise reads the channel axis as a Z axis (logging `z_axis not
+specified, assuming it is dim 0`) and returns an empty mask without raising an error. A channel
+number that does not exist in the exported tile is now reported as such, rather than surfacing as
+an index error from inside Python.
+
 ### Testing status
 
 - **Detection via the Appose transport:** tested on Windows + CUDA and on Linux with Cellpose 3
-  and Cellpose-SAM/4 models.
+  and Cellpose-SAM/4 models. `ApposeChannelMatrixLiveTest` exercises the channel configurations the
+  shipped example scripts produce (1/2/3/7-channel tiles, with and without `cellposeChannels`, and
+  a multi-tile run) against real Cellpose; run it with
+  `CELLPOSE_LIVE=true ./gradlew test --tests '*ApposeChannelMatrixLiveTest'`
+  (add `CELLPOSE_LIVE_SAM=true` to include the Cellpose-SAM cases, which build a second
+  environment).
 - **Training / validation / QC:** **not yet tested end-to-end against this change.** These paths
   are unchanged by design and provably do not go through the Appose backend (see above), but they
   have not been re-run on a real training environment as part of this work. End-to-end training
