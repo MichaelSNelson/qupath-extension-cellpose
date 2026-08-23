@@ -1,5 +1,5 @@
 /*-
- * Copyright 2026 QuPath developers
+ * Copyright 2026 BioImaging & Optics Platform (BIOP), Ecole Polytechnique Federale de Lausanne
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.

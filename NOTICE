@@ -78,3 +78,17 @@ Python environment and exchanging data through shared memory.
 
 Appose and its transitive dependencies (Apache Ivy, Apache Commons Compress, JNA)
 are consumed as unmodified binary dependencies under their respective licenses.
+
+-------------------------------------------------------------------------------
+3. Apache Groovy JSON module (Apache-2.0)
+-------------------------------------------------------------------------------
+
+Appose's Java-side worker protocol needs groovy.json.JsonOutput. QuPath ships
+Groovy core but not the groovy-json module, so it is added as an explicit
+dependency, pinned to QuPath's own Groovy version.
+
+    Project : Apache Groovy (groovy-json)
+    Source  : https://groovy.apache.org
+    License : Apache-2.0
+
+It is consumed as an unmodified binary dependency.
