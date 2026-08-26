@@ -15,6 +15,7 @@ import qupath.lib.gui.prefs.PathPrefs;
 import qupath.lib.gui.tools.MenuTools;
 import qupath.ext.biop.cellpose.backend.CellposeDevice;
 import qupath.ext.biop.cellpose.backend.CellposeTransport;
+import qupath.ext.biop.cellpose.backend.ApposeBackend;
 import qupath.ext.biop.cellpose.ui.PythonConsoleWindow;
 
 import java.io.IOException;
@@ -166,9 +167,14 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
 
         // Add a menu item to open the Python console, which surfaces the in-process backend's
         // Python diagnostics (the Appose IPC channel reserves stdout, so this is the only runtime view).
+        // The in-process backend keeps its Python worker alive between runs so each run does not pay
+        // to start an interpreter and reload the model. "Shut down Python worker" ends it, which is
+        // how a user reclaims the GPU memory it holds without restarting QuPath; the next run simply
+        // starts a fresh one.
         MenuTools.addMenuItems(
                 qupath.getMenu("Extensions>Cellpose", true),
-                new Action("Python console", e -> PythonConsoleWindow.show()));
+                new Action("Python console", e -> PythonConsoleWindow.show()),
+                new Action("Shut down Python worker", e -> ApposeBackend.shutdownWorkers()));
 
     }
 

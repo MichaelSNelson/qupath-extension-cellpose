@@ -102,12 +102,16 @@ public class ApposeBackend implements CellposeBackend {
     /**
      * Serializes the Python side. Appose multiplexes every task over one worker process, and the
      * vendored Cellpose scripts cache the model in a single Python global with no lock of their own,
-     * so two concurrent {@code model.eval} calls would race on that model and on GPU memory. Tile
-     * extraction and mask tracing - the CPU-bound work worth parallelizing - happen outside this.
+     * so two concurrent {@code model.eval} calls would race on that model and on GPU memory. The
+     * lock lives on the {@link Worker}, not on this backend, because the worker is shared between
+     * runs. Tile extraction and mask tracing - the CPU-bound work worth parallelizing - stay outside
+     * it.
      */
-    private final Object pythonLock = new Object();
+    private Object pythonLock() {
+        return worker.lock;
+    }
 
-    private Service service;
+    private Worker worker;
     private String runScript;
     private String initScript;
     private boolean useGpu;
@@ -192,12 +196,20 @@ public class ApposeBackend implements CellposeBackend {
      * then cached in Python and reused by every subsequent task.
      */
     private void initializeModel(CellposeSegmentationParams params) throws IOException, InterruptedException {
-        Map<String, Object> inputs = new HashMap<>();
-        inputs.put("use_gpu", useGpu);
-        inputs.put("custom_model", params.isCustomModel() ? params.getModel() : null);
-        inputs.put("model_name", params.isCustomModel() ? null : params.getModel());
-        synchronized (pythonLock) {
+        String signature = (params.isCustomModel() ? "custom:" : "named:") + params.getModel();
+        synchronized (pythonLock()) {
+            if (signature.equals(worker.loadedModel)) {
+                logger.info("Reusing the Cellpose model already loaded in the Python worker ({})", params.getModel());
+                return;
+            }
+            Map<String, Object> inputs = new HashMap<>();
+            inputs.put("use_gpu", useGpu);
+            inputs.put("custom_model", params.isCustomModel() ? params.getModel() : null);
+            inputs.put("model_name", params.isCustomModel() ? null : params.getModel());
+            // Clear first: if loading fails, the worker must not claim to hold a model it does not.
+            worker.loadedModel = null;
             submit(initScript, inputs, "Initializing Cellpose model");
+            worker.loadedModel = signature;
         }
     }
 
@@ -228,7 +240,7 @@ public class ApposeBackend implements CellposeBackend {
         ShortProcessor labelProcessor;
         try {
             Map<String, Object> inputs = buildInputs(params, imp.getStackSize(), layout, input, labels);
-            synchronized (pythonLock) {
+            synchronized (pythonLock()) {
                 submit(runScript, inputs, "Segmenting tile " + tile.getImageFile().getName());
             }
             labelProcessor = NDArrays.labelsToShortProcessor(labels, width, height);
@@ -252,8 +264,58 @@ public class ApposeBackend implements CellposeBackend {
         tileReader.accept(tile);
     }
 
+    /**
+     * A Python worker kept alive between runs, together with the lock that serializes access to it
+     * and a note of which model it currently holds loaded.
+     * <p>
+     * Starting a worker costs several seconds -- almost all of it importing torch and cellpose -- so
+     * creating one per {@code detectObjects} call made every run after the first pay for a Python
+     * interpreter it did not need. A two-stage script paid it twice; a project batch paid it once
+     * per image. The worker therefore outlives the backend and is closed at JVM shutdown, or on
+     * demand from {@code Extensions > Cellpose}, which is also how a user reclaims GPU memory.
+     */
+    private static final class Worker {
+        final Service service;
+        /** Serializes the Cellpose call; see {@link ApposeBackend#pythonLock}. */
+        final Object lock = new Object();
+        /** Model currently loaded in this worker, so an unchanged model is not reloaded. */
+        String loadedModel;
+
+        Worker(Service service) {
+            this.service = service;
+        }
+    }
+
+    /** Live workers, keyed by pixi sub-environment (model family + device). */
+    private static final Map<String, Worker> WORKERS = new HashMap<>();
+
+    /**
+     * Shut down every cached Python worker, releasing the GPU memory they hold. Safe to call at any
+     * time; the next run simply starts a fresh worker.
+     */
+    public static synchronized void shutdownWorkers() {
+        if (WORKERS.isEmpty()) {
+            logger.info("No Cellpose Python worker is running");
+            return;
+        }
+        logger.info("Shutting down {} Cellpose Python worker(s)", WORKERS.size());
+        WORKERS.values().forEach(w -> {
+            try {
+                ApposeEnvironments.withExtensionClassLoader(() -> {
+                    w.service.close();
+                    return null;
+                });
+            } catch (Exception e) {
+                logger.warn("Error closing Appose Cellpose service: {}", e.getMessage(), e);
+            } finally {
+                LIVE_SERVICES.remove(w.service);
+            }
+        });
+        WORKERS.clear();
+    }
+
     private synchronized void ensureService(CellposeSegmentationParams params) throws IOException {
-        if (service != null)
+        if (worker != null)
             return;
 
         this.useGpu = ApposeEnvironments.resolveUseGpu(params.getDevice());
@@ -263,15 +325,34 @@ public class ApposeBackend implements CellposeBackend {
 
         this.runScript = ApposeEnvironments.readResource(scriptName);
         this.initScript = ApposeEnvironments.readResource(initName);
-        String cpUtils = ApposeEnvironments.readResource("cp_utils.py");
 
+        this.worker = acquireWorker(envName, params);
+    }
+
+    /** Reuse the worker for this environment if one is already running, otherwise start one. */
+    private static synchronized Worker acquireWorker(String envName, CellposeSegmentationParams params) throws IOException {
+        Worker existing = WORKERS.get(envName);
+        if (existing != null) {
+            // A cached worker is only useful if its process is still there. It may not be: the user
+            // can shut it down from the menu, and a Python worker can die on its own. Replace a dead
+            // one rather than handing it out and failing the run.
+            if (existing.service.isAlive()) {
+                logger.info("Reusing the running Cellpose Python worker for environment {}", envName);
+                return existing;
+            }
+            logger.info("The cached Cellpose Python worker for environment {} is no longer running; starting a new one", envName);
+            LIVE_SERVICES.remove(existing.service);
+            WORKERS.remove(envName);
+        }
+
+        String cpUtils = ApposeEnvironments.readResource("cp_utils.py");
         // FIX: pre-import numpy FIRST (a numpy import after the stdin reader starts deadlocks on
         // Windows), then the parent-watcher, then cp_utils. init() replaces (not appends), so this
         // is one combined string.
         String init = "import numpy\n" + parentWatcherSnippet() + cpUtils;
 
         logger.info("Starting Appose Cellpose service (device={} -> environment {}, use_gpu={})",
-                params.getDevice(), envName, useGpu);
+                params.getDevice(), envName, ApposeEnvironments.resolveUseGpu(params.getDevice()));
         try {
             Service created = ApposeEnvironments.withExtensionClassLoader(() -> {
                 Service svc = ApposeEnvironments.getEnvironment().activate(envName).python();
@@ -289,8 +370,10 @@ public class ApposeBackend implements CellposeBackend {
                 svc.init(init);
                 return svc;
             });
-            this.service = created;
             LIVE_SERVICES.add(created);
+            Worker w = new Worker(created);
+            WORKERS.put(envName, w);
+            return w;
         } catch (org.apposed.appose.BuildException e) {
             throw new IOException("Failed to activate the Appose environment '" + envName + "'", e);
         } catch (IOException e) {
@@ -543,7 +626,7 @@ public class ApposeBackend implements CellposeBackend {
         Task task;
         try {
             task = ApposeEnvironments.withExtensionClassLoader(() -> {
-                Task t = service.task(script, inputs);
+                Task t = worker.service.task(script, inputs);
                 t.listen(ApposeBackend::relay);
                 t.start();
                 return t;
@@ -704,19 +787,9 @@ public class ApposeBackend implements CellposeBackend {
 
     @Override
     public void close() {
-        if (service != null) {
-            Service closing = service;
-            try {
-                ApposeEnvironments.withExtensionClassLoader(() -> {
-                    closing.close();
-                    return null;
-                });
-            } catch (Exception e) {
-                logger.warn("Error closing Appose Cellpose service: {}", e.getMessage(), e);
-            } finally {
-                LIVE_SERVICES.remove(closing);
-                service = null;
-            }
-        }
+        // The Python worker deliberately outlives this backend, so the next run does not pay for a
+        // fresh interpreter and model load. It is closed at JVM shutdown, or on demand through
+        // Extensions > Cellpose. Only the reference is dropped here.
+        worker = null;
     }
 }

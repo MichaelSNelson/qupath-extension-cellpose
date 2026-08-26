@@ -182,9 +182,16 @@ cycle disappears. Tiles are processed by a pool sized from QuPath's parallelism 
 `.nThreads(...)`), so only that many tiles hold pixels at once and one tile's masks are traced while
 the next is being segmented.
 
-It also removes the manual Cellpose install, the Python startup and model load per run, and the
-dependence on a filesystem watch service to notice results, and it reports per-tile progress and
-errors live, honouring cancellation between tiles.
+**The Python worker is kept alive between runs.** Starting one costs several seconds, nearly all of
+it importing torch and cellpose, so a fresh worker per detection meant a two-stage script paid that
+twice and a project batch paid it once per image. The worker and the loaded model are now reused for
+as long as the model and device are unchanged. `Extensions > Cellpose > Shut down Python worker`
+ends it, which is how you reclaim the GPU memory it holds without restarting QuPath; the next run
+starts a fresh one.
+
+It also removes the manual Cellpose install and the dependence on a filesystem watch service to
+notice results, and it reports per-tile progress and errors live, honouring cancellation between
+tiles.
 
 It is **off by default** and changes nothing about the existing subprocess workflow. To use it:
 
