@@ -171,9 +171,20 @@ and you can then use it within the QuPath Extension Cellpose.
 
 Alongside the default subprocess backend, Cellpose can be run *in-process* through
 [Appose](https://github.com/apposed/appose). Tiles are handed to Python in shared memory and the
-label masks come straight back, which avoids the per-tile TIFF write and read. This path also
-**builds its own Python environment** (via `pixi`) on first use, so no manual Cellpose/conda
-install is needed for it.
+label masks come straight back, so Cellpose runs inside the QuPath process instead of as an
+external command. This path also **builds its own Python environment** (via `pixi`) on first use,
+so no manual Cellpose/conda install is needed for it.
+
+**No temporary files are written.** The subprocess backend has to stage every tile into
+`cellpose-temp` and read a `_cp_masks.tif` back for each one; the Appose path extracts each tile's
+pixels on demand and receives its labels in memory, so the whole per-tile write/read/write/read
+cycle disappears. Tiles are processed by a pool sized from QuPath's parallelism setting (or
+`.nThreads(...)`), so only that many tiles hold pixels at once and one tile's masks are traced while
+the next is being segmented.
+
+It also removes the manual Cellpose install, the Python startup and model load per run, and the
+dependence on a filesystem watch service to notice results, and it reports per-tile progress and
+errors live, honouring cancellation between tiles.
 
 It is **off by default** and changes nothing about the existing subprocess workflow. To use it:
 

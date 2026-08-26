@@ -27,12 +27,18 @@ import org.apposed.appose.TaskEvent;
 import org.apposed.appose.TaskException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.lib.common.ThreadTools;
 import qupath.ext.biop.cellpose.TileFile;
 import qupath.ext.biop.cellpose.ui.PythonConsoleWindow;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -44,13 +50,19 @@ import java.util.function.Consumer;
 /**
  * In-process Cellpose segmentation backend based on Appose.
  * <p>
- * This is Apache-2.0 original work. For each tile, this backend reads the input tile image that
- * {@code Cellpose2D} already saved to disk, converts it to an Appose {@link NDArray} in shared
+ * This is Apache-2.0 original work. Nothing touches the disk: for each tile the backend obtains the
+ * pixels from {@code Cellpose2D} on demand, converts them to an Appose {@link NDArray} in shared
  * memory (through {@link NDArrays}), submits the vendored Cellpose script for the requested model
- * family, reads the label {@link NDArray} back, and writes it to the tile's {@code _cp_masks.tif}
- * file exactly where the existing subprocess path would - so the downstream mask reader in
- * {@code Cellpose2D} stays untouched. After each tile's masks are written, the tile reader supplied
- * by {@code Cellpose2D} turns those masks into candidate detections.
+ * family, reads the label {@link NDArray} back, and hands it to the tile reader in memory. (A tile
+ * that does have a file behind it - which only happens if one is constructed the subprocess way - is
+ * still read from and written to disk, so the two paths can coexist.)
+ * <p>
+ * Tiles are processed by a bounded pool sized from QuPath's parallelism setting, so at most that
+ * many tiles hold pixels at once and memory does not scale with the size of the region. The Cellpose
+ * call itself is serialized: Appose multiplexes all tasks over one worker process and the vendored
+ * scripts cache the model in a single Python global with no lock, so concurrent {@code model.eval}
+ * calls would race on the model and on GPU memory. Extracting a tile and tracing its masks - the
+ * CPU-bound work - happen outside that lock, so they overlap with another tile's segmentation.
  * <p>
  * The Appose service lifecycle (build the pixi environment, activate the model-family
  * sub-environment, initialize the worker with {@code cp_utils.py}, then load the model with
@@ -84,6 +96,17 @@ public class ApposeBackend implements CellposeBackend {
 
     private final Consumer<TileFile> tileReader;
 
+    /** Requested worker count; <= 0 means follow QuPath's own parallelism setting. */
+    private final int requestedThreads;
+
+    /**
+     * Serializes the Python side. Appose multiplexes every task over one worker process, and the
+     * vendored Cellpose scripts cache the model in a single Python global with no lock of their own,
+     * so two concurrent {@code model.eval} calls would race on that model and on GPU memory. Tile
+     * extraction and mask tracing - the CPU-bound work worth parallelizing - happen outside this.
+     */
+    private final Object pythonLock = new Object();
+
     private Service service;
     private String runScript;
     private String initScript;
@@ -96,8 +119,18 @@ public class ApposeBackend implements CellposeBackend {
      *                   {@code Cellpose2D} supplies one that delegates to its (unchanged) mask reader
      */
     public ApposeBackend(Consumer<TileFile> tileReader) {
+        this(tileReader, -1);
+    }
+
+    /**
+     * @param tileReader callback turning a finished tile's masks into candidate objects
+     * @param nThreads   worker count for tile extraction and mask tracing; <= 0 follows
+     *                   QuPath's parallelism setting
+     */
+    public ApposeBackend(Consumer<TileFile> tileReader, int nThreads) {
         this.tileReader = tileReader;
         installShutdownHook();
+        this.requestedThreads = nThreads;
     }
 
     @Override
@@ -109,53 +142,114 @@ public class ApposeBackend implements CellposeBackend {
         }
 
         ensureService(params);
+        initializeModel(params);
 
-        boolean modelInitialized = false;
-        for (TileFile tile : tiles) {
-            // Cooperative cancellation: Cellpose's model.eval is a single blocking call that cannot
-            // be interrupted mid-tile, so honor QuPath's Stop between tiles.
-            if (Thread.currentThread().isInterrupted())
-                throw new InterruptedException("Cellpose segmentation cancelled before tile "
-                        + tile.getImageFile().getName());
+        int workers = Math.max(1, Math.min(
+                requestedThreads > 0 ? requestedThreads : ThreadTools.getParallelism(),
+                tiles.size()));
+        logger.info("Segmenting {} tile(s) with {} worker(s)", tiles.size(), workers);
 
-            ImagePlus imp = IJ.openImage(tile.getImageFile().getAbsolutePath());
-            if (imp == null) {
-                logger.warn("Could not open tile image {}; skipping", tile.getImageFile());
-                continue;
-            }
-            int width = imp.getWidth();
-            int height = imp.getHeight();
+        // Bounded pool: at most `workers` tiles hold pixels at once, so memory scales with the
+        // thread count rather than with the number of tiles. Each worker extracts its tile, waits
+        // its turn for the (serialized) Cellpose call, then traces the masks while another worker
+        // is in Python -- which is the overlap that makes this worth doing.
+        ExecutorService pool = Executors.newFixedThreadPool(workers,
+                ThreadTools.createThreadFactory("cellpose-appose-", true));
+        List<Future<?>> futures = new ArrayList<>(tiles.size());
+        try {
+            for (TileFile tile : tiles)
+                futures.add(pool.submit(() -> { processTile(tile, params); return null; }));
 
-            // Cellpose 3 gets a compacted array holding only the channels it will use (see
-            // Cp3Layout); Cellpose 4 gets the whole stack, because cp4.py does its own slicing.
-            Cp3Layout layout = params.isCellposeSam()
-                    ? null
-                    : Cp3Layout.resolve(params.getChannel1(), params.getChannel2(), imp.getStackSize());
-
-            NDArray input = allocate(() -> layout == null ? NDArrays.fromImagePlus(imp) : layout.pack(imp));
-            NDArray labels = allocate(() -> NDArrays.allocateLabels(width, height));
-            try {
-                Map<String, Object> inputs = buildInputs(params, imp.getStackSize(), layout, input, labels);
-
-                if (!modelInitialized) {
-                    submit(initScript, inputs, "Initializing Cellpose model");
-                    modelInitialized = true;
+            for (Future<?> future : futures) {
+                try {
+                    future.get();
+                } catch (ExecutionException e) {
+                    // Stop the run on the first real failure, and don't let the remaining tiles
+                    // keep the user waiting for an outcome that is already lost.
+                    futures.forEach(f -> f.cancel(true));
+                    Throwable cause = e.getCause();
+                    if (cause instanceof IOException)
+                        throw (IOException) cause;
+                    if (cause instanceof InterruptedException)
+                        throw (InterruptedException) cause;
+                    throw new IOException("Cellpose segmentation failed: " + cause.getMessage(), cause);
+                } catch (CancellationException e) {
+                    throw new InterruptedException("Cellpose segmentation cancelled");
                 }
-                submit(runScript, inputs, "Segmenting tile " + tile.getImageFile().getName());
-
-                ShortProcessor labelProcessor = NDArrays.labelsToShortProcessor(labels, width, height);
-                ImagePlus maskImp = new ImagePlus(tile.getLabelFile().getName(), labelProcessor);
-                IJ.save(maskImp, tile.getLabelFile().getAbsolutePath());
-                maskImp.close();
-            } finally {
-                closeQuietly(input);
-                closeQuietly(labels);
-                imp.close();
             }
-
-            // Read detections from the mask we just wrote, using Cellpose2D's unchanged reader.
-            tileReader.accept(tile);
+        } catch (InterruptedException e) {
+            futures.forEach(f -> f.cancel(true));
+            Thread.currentThread().interrupt();
+            throw e;
+        } finally {
+            pool.shutdownNow();
         }
+    }
+
+    /**
+     * Load the model once, before any tile is dispatched, so the workers never race to initialize
+     * it. The vendored init script reads only the model-selection globals; the model it builds is
+     * then cached in Python and reused by every subsequent task.
+     */
+    private void initializeModel(CellposeSegmentationParams params) throws IOException, InterruptedException {
+        Map<String, Object> inputs = new HashMap<>();
+        inputs.put("use_gpu", useGpu);
+        inputs.put("custom_model", params.isCustomModel() ? params.getModel() : null);
+        inputs.put("model_name", params.isCustomModel() ? null : params.getModel());
+        synchronized (pythonLock) {
+            submit(initScript, inputs, "Initializing Cellpose model");
+        }
+    }
+
+    /** Extract one tile, segment it, and hand the labels to the tile reader. */
+    private void processTile(TileFile tile, CellposeSegmentationParams params) throws IOException, InterruptedException {
+        // Cooperative cancellation: Cellpose's model.eval is a single blocking call that cannot be
+        // interrupted mid-tile, so honor QuPath's Stop between tiles.
+        if (Thread.currentThread().isInterrupted())
+            throw new InterruptedException("Cellpose segmentation cancelled before tile "
+                    + tile.getImageFile().getName());
+
+        ImagePlus imp = tile.openImage();
+        if (imp == null) {
+            logger.warn("Could not obtain tile image {}; skipping", tile.getImageFile());
+            return;
+        }
+        int width = imp.getWidth();
+        int height = imp.getHeight();
+
+        // Cellpose 3 gets a compacted array holding only the channels it will use (see Cp3Layout);
+        // Cellpose 4 gets the whole stack, because cp4.py does its own slicing.
+        Cp3Layout layout = params.isCellposeSam()
+                ? null
+                : Cp3Layout.resolve(params.getChannel1(), params.getChannel2(), imp.getStackSize());
+
+        NDArray input = allocate(() -> layout == null ? NDArrays.fromImagePlus(imp) : layout.pack(imp));
+        NDArray labels = allocate(() -> NDArrays.allocateLabels(width, height));
+        ShortProcessor labelProcessor;
+        try {
+            Map<String, Object> inputs = buildInputs(params, imp.getStackSize(), layout, input, labels);
+            synchronized (pythonLock) {
+                submit(runScript, inputs, "Segmenting tile " + tile.getImageFile().getName());
+            }
+            labelProcessor = NDArrays.labelsToShortProcessor(labels, width, height);
+        } finally {
+            closeQuietly(input);
+            closeQuietly(labels);
+            imp.close();
+        }
+
+        if (tile.isInMemory()) {
+            // No mask file: hand the labels straight to the reader.
+            tile.setLabels(labelProcessor);
+        } else {
+            ImagePlus maskImp = new ImagePlus(tile.getLabelFile().getName(), labelProcessor);
+            IJ.save(maskImp, tile.getLabelFile().getAbsolutePath());
+            maskImp.close();
+        }
+
+        // Turn the masks into candidate detections. Deliberately outside the Python lock, so this
+        // runs while another worker is segmenting.
+        tileReader.accept(tile);
     }
 
     private synchronized void ensureService(CellposeSegmentationParams params) throws IOException {

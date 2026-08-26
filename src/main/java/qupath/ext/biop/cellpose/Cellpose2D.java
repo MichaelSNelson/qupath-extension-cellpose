@@ -456,21 +456,26 @@ public class Cellpose2D {
             ImageDataOp opWithPreprocessing = op.appendOps(fullPreprocess.toArray(ImageOp[]::new));
 
 
-            // Keep a reference to the images here while they are being saved
-            logger.info("Saving images for {} tiles", tiles.size());
-
-            // Save each tile to an image and keep a reference to it
-            List<TileFile> individualTiles = tiles.parallelStream()
-                    .map(tile -> {
-                        try {
-                            return saveTileImage(opWithPreprocessing, imageData, tile, realParent);
-                        } catch (IOException e) {
-                            logger.warn("Could not save tile image", e);
-                        }
-                        return null;
-                    })
+            // The subprocess backend needs every tile on disk before Cellpose is launched over the
+            // directory. The in-process backend does not: it produces each tile's pixels on demand
+            // and gets the labels back in memory, so nothing is written at all.
+            if (writesTilesToDisk()) {
+                logger.info("Saving images for {} tiles", tiles.size());
+                return tiles.parallelStream()
+                        .map(tile -> {
+                            try {
+                                return saveTileImage(opWithPreprocessing, imageData, tile, realParent);
+                            } catch (IOException e) {
+                                logger.warn("Could not save tile image", e);
+                            }
+                            return null;
+                        })
+                        .collect(Collectors.toList());
+            }
+            logger.info("Processing {} tiles in memory (no temporary files)", tiles.size());
+            return tiles.stream()
+                    .map(tile -> lazyTile(opWithPreprocessing, imageData, tile, realParent))
                     .collect(Collectors.toList());
-            return individualTiles;
         }).flatMap(List::stream).collect(Collectors.toList());
 
         // Here the files are saved, and we can run cellpose to recover the masks
@@ -778,22 +783,8 @@ public class Cellpose2D {
      */
     private TileFile saveTileImage(ImageDataOp op, ImageData<BufferedImage> imageData, RegionRequest request, PathObject parent) throws IOException {
 
-        // This applies all ops to the current tile
-        Mat mat;
-
-        mat = op.apply(imageData, request);
-
-        // Convert to something we can save
-        ImagePlus imp = OpenCVTools.matToImagePlus("Temp", mat);
-
-        //BufferedImage image = OpenCVTools.matToBufferedImage(mat);
-
-        File tempFile = new File(tempDirectory,
-                "Temp_" +
-                        request.getX() + "_" +
-                        request.getY() +
-                        "_z" + request.getZ() +
-                        "_t" + request.getT() + ".tif");
+        ImagePlus imp = createTileImage(op, imageData, request);
+        File tempFile = tileFile(request);
         logger.info("Saving to {}", tempFile);
 
         // Add check if image is too small, do not process it!
@@ -804,6 +795,45 @@ public class Cellpose2D {
         }
 
         return new TileFile(request, tempFile, parent);
+    }
+
+    /**
+     * Describe a tile without materialising it, for the in-process (Appose) backend. The pixels are
+     * produced on demand by the backend, one tile per worker thread, and the label image comes back
+     * in memory - so neither the input tile nor its mask is ever written to disk. The file name is
+     * still computed, because it is what identifies the tile in log messages.
+     *
+     * @param op        the ops to apply to the tile
+     * @param imageData the current ImageData
+     * @param request   the region this tile covers
+     * @param parent    the real parent object of this tile
+     * @return a tile that computes its image on demand
+     */
+    private TileFile lazyTile(ImageDataOp op, ImageData<BufferedImage> imageData, RegionRequest request, PathObject parent) {
+        return new TileFile(request, tileFile(request), parent, () -> {
+            try {
+                return createTileImage(op, imageData, request);
+            } catch (IOException e) {
+                logger.warn("Could not create tile image for {}", request, e);
+                return null;
+            }
+        });
+    }
+
+    /** Apply the op chain to one tile and convert the result to an ImageJ image. */
+    private ImagePlus createTileImage(ImageDataOp op, ImageData<BufferedImage> imageData, RegionRequest request) throws IOException {
+        Mat mat = op.apply(imageData, request);
+        return OpenCVTools.matToImagePlus("Temp", mat);
+    }
+
+    /** The temporary file name identifying a tile. */
+    private File tileFile(RegionRequest request) {
+        return new File(tempDirectory,
+                "Temp_" +
+                        request.getX() + "_" +
+                        request.getY() +
+                        "_z" + request.getZ() +
+                        "_t" + request.getT() + ".tif");
     }
 
     /**
@@ -843,6 +873,18 @@ public class Cellpose2D {
     }
 
     /**
+     * Whether the transport chosen for this run needs each tile written to disk before Cellpose is
+     * started. The external subprocess is pointed at a directory and reads the tiles from it; the
+     * in-process backend takes the pixels directly, so it needs no files.
+     *
+     * @return true if tiles must be written to the temporary directory
+     */
+    private boolean writesTilesToDisk() {
+        return CellposeBackend.resolveTransport(this.transport, CellposeExtension.getTransportPreference())
+                != CellposeTransport.APPOSE;
+    }
+
+    /**
      * Create the backend that will run Cellpose for detection. The builder flag (if set through
      * {@link CellposeBuilder#transport(CellposeTransport)}/{@link CellposeBuilder#useAppose()})
      * takes precedence; otherwise the extension-wide preference is honored. The default is the
@@ -856,7 +898,7 @@ public class Cellpose2D {
         Consumer<TileFile> tileReader = tile -> tile.setCandidates(readObjectsFromTileFile(tile));
         if (chosen == CellposeTransport.APPOSE) {
             logger.info("Running Cellpose with the in-process (Appose) backend");
-            return new ApposeBackend(tileReader);
+            return new ApposeBackend(tileReader, this.nThreads);
         }
         logger.info("Running Cellpose with the external subprocess backend");
         return new SubprocessBackend(this.tempDirectory, this.parameters, this.model, this.disableGPU,
@@ -1437,10 +1479,15 @@ public class Cellpose2D {
     private Collection<CandidateObject> readObjectsFromTileFile(TileFile tileFile) {
         RegionRequest request = tileFile.getTile();
 
-        logger.info("Reading {}", tileFile.getLabelFile().getName());
-        // Open the image
-        ImagePlus label_imp = IJ.openImage(tileFile.getLabelFile().getAbsolutePath());
-        ImageProcessor ip = label_imp.getProcessor();
+        // The in-process backend hands the labels back in memory; the subprocess backend writes
+        // them to disk for Cellpose-compatible tooling, so read them from there.
+        ImagePlus label_imp = null;
+        ImageProcessor ip = tileFile.getLabels();
+        if (ip == null) {
+            logger.info("Reading {}", tileFile.getLabelFile().getName());
+            label_imp = IJ.openImage(tileFile.getLabelFile().getAbsolutePath());
+            ip = label_imp.getProcessor();
+        }
 
         Wand wand = new Wand(ip);
 
@@ -1485,7 +1532,11 @@ public class Cellpose2D {
                 }
             }
         }
-        label_imp.close();
+        if (label_imp != null)
+            label_imp.close();
+        // Tracing consumed the labels (it erases each ROI as it goes), so drop the pixels now rather
+        // than retaining every tile's mask for the lifetime of the run.
+        tileFile.clearLabels();
         return rois;
     }
 
