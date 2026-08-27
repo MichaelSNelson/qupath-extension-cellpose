@@ -26,11 +26,14 @@ import org.apposed.appose.NDArray;
 import org.apposed.appose.NDArray.DType;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
@@ -150,19 +153,43 @@ class NDArraysTest {
     }
 
     @Test
-    void labelsRoundTripThroughShortProcessor() {
+    void labelsRoundTripThroughShortProcessor() throws Exception {
         NDArray labels = NDArrays.allocateLabels(WIDTH, HEIGHT);
         try {
-            assertEquals(DType.UINT16, labels.dType());
+            // 32-bit, so a tile that somehow exceeded 65535 objects is reported rather than wrapped.
+            assertEquals(DType.UINT32, labels.dType());
             ByteBuffer buffer = labels.buffer().order(ByteOrder.nativeOrder());
             buffer.rewind();
             for (int i = 0; i < WIDTH * HEIGHT; i++)
-                buffer.putShort((short) (i % 500));
+                buffer.putInt(i % 500);
 
             ShortProcessor sp = NDArrays.labelsToShortProcessor(labels, WIDTH, HEIGHT);
             for (int y = 0; y < HEIGHT; y++)
                 for (int x = 0; x < WIDTH; x++)
                     assertEquals((y * WIDTH + x) % 500, sp.get(x, y), "label pixel (" + x + "," + y + ")");
+        } finally {
+            labels.close();
+        }
+    }
+
+    @Test
+    void tooManyLabelsIsReportedRatherThanTruncated() {
+        // Cellpose writes its result with `output_labels[:] = masks`, a numpy slice assignment that
+        // casts SILENTLY. Into a 16-bit buffer, object 65536 would become background and 65537 would
+        // merge into object 1 -- a plausible-looking, wrong segmentation with no error anywhere.
+        NDArray labels = NDArrays.allocateLabels(WIDTH, HEIGHT);
+        try {
+            ByteBuffer buffer = labels.buffer().order(ByteOrder.nativeOrder());
+            buffer.rewind();
+            for (int i = 0; i < WIDTH * HEIGHT; i++)
+                buffer.putInt(0);
+            buffer.rewind();
+            buffer.putInt(70000);
+
+            IOException e = assertThrows(IOException.class,
+                    () -> NDArrays.labelsToShortProcessor(labels, WIDTH, HEIGHT));
+            assertTrue(e.getMessage().contains("70000"), e.getMessage());
+            assertTrue(e.getMessage().contains("tileSize"), e.getMessage());
         } finally {
             labels.close();
         }

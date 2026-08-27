@@ -61,7 +61,18 @@ final class ApposeEnvironments {
      * it. Used only to stage the manifest/lock (see {@link #syncManifest}) and to detect the first
      * build; the build itself still targets the same directory.
      */
-    private static final String ENV_DIR_NAME = "cellpose-appose";
+    /**
+     * Directory (under Appose's share dir) holding this extension's Python environment.
+     * <p>
+     * Deliberately NOT the vendored manifest's own workspace name, {@code cellpose-appose}: that is
+     * also what the Fiji cellpose-appose plugin uses, and Appose derives the environment directory
+     * from the workspace name. Sharing it means both tools stage into one pixi workspace under
+     * incompatible policies - this extension installs a pinned, committed lock while the Fiji plugin
+     * resolves fresh - so each would overwrite the other's manifest and trigger a multi-GB rebuild.
+     * The name is overridden on the builder rather than in the manifest, which stays byte-identical
+     * to upstream.
+     */
+    private static final String ENV_DIR_NAME = "qupath-cellpose-appose";
 
     private static final Object LOCK = new Object();
     private static volatile Environment environment;
@@ -162,6 +173,10 @@ final class ApposeEnvironments {
         try {
             return withExtensionClassLoader(() -> Appose.pixi()
                     .content(pixiToml)
+                    // Keep this extension's environment out of the Fiji plugin's directory; see
+                    // ENV_DIR_NAME. Must stay in step with getEnvironmentPath(), which stages the
+                    // manifest and lock into the same place.
+                    .name(ENV_DIR_NAME)
                     .subscribeProgress((title, current, maximum) -> {
                         String line = "Cellpose env build: " + title + " (" + current + "/" + maximum + ")";
                         logger.info(line);

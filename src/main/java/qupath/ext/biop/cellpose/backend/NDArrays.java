@@ -27,6 +27,7 @@ import org.apposed.appose.NDArray.DType;
 import org.apposed.appose.NDArray.Shape;
 import org.apposed.appose.NDArray.Shape.Order;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
@@ -47,6 +48,9 @@ import java.nio.ByteOrder;
  * {@link NDArray#close() closed} by the caller once done, to avoid leaking shared memory.
  */
 final class NDArrays {
+
+    /** Most objects a 16-bit label image can distinguish (0 is background). */
+    private static final long MAX_LABELS_PER_TILE = 65535L;
 
     private NDArrays() {}
 
@@ -180,8 +184,14 @@ final class NDArrays {
     }
 
     /**
-     * Allocate a 2D label {@link NDArray} of shape (height, width) in C order, using UINT16, which
-     * matches the label output written back by the Cellpose scripts (up to 65535 labels per tile).
+     * Allocate a 2D label {@link NDArray} of shape (height, width) in C order.
+     * <p>
+     * UINT32, deliberately, even though a tile is never expected to hold more than 65535 objects.
+     * The Cellpose scripts write the result with {@code output_labels[:] = masks}, and a numpy slice
+     * assignment casts SILENTLY: into a UINT16 buffer, object 65536 becomes background and 65537
+     * merges into object 1, producing a plausible-looking but wrong segmentation with no error
+     * anywhere. A 32-bit buffer cannot wrap, so the impossible case is reported by
+     * {@link #labelsToShortProcessor} instead of corrupting the result.
      *
      * @param width  the label image width
      * @param height the label image height
@@ -189,23 +199,40 @@ final class NDArrays {
      */
     static NDArray allocateLabels(int width, int height) {
         Shape shape = new Shape(Order.C_ORDER, height, width);
-        return new NDArray(DType.UINT16, shape);
+        return new NDArray(DType.UINT32, shape);
     }
 
     /**
-     * Read a 2D UINT16 label {@link NDArray} back into an ImageJ {@link ShortProcessor}.
+     * Read a 2D UINT32 label {@link NDArray} back into an ImageJ {@link ShortProcessor}.
+     * <p>
+     * Downstream tracing works on 16-bit labels, which is ample for any realistic tile. If Cellpose
+     * ever returns more objects than that, this fails with an actionable message rather than
+     * quietly truncating them.
      *
-     * @param labels a UINT16 NDArray with shape (height, width) in C order
+     * @param labels a UINT32 NDArray with shape (height, width) in C order
      * @param width  the expected width
      * @param height the expected height
      * @return a new ShortProcessor holding the label values
+     * @throws IOException if the tile holds more objects than a 16-bit label image can represent
      */
-    static ShortProcessor labelsToShortProcessor(NDArray labels, int width, int height) {
+    static ShortProcessor labelsToShortProcessor(NDArray labels, int width, int height) throws IOException {
         ByteBuffer buffer = labels.buffer().order(ByteOrder.nativeOrder());
         buffer.rewind();
         short[] pixels = new short[width * height];
+        long max = 0;
         for (int i = 0; i < pixels.length; i++) {
-            pixels[i] = buffer.getShort();
+            long value = buffer.getInt() & 0xFFFFFFFFL;
+            if (value > max)
+                max = value;
+            pixels[i] = (short) value;
+        }
+        if (max > MAX_LABELS_PER_TILE) {
+            // Refuse rather than truncate: the caller would otherwise receive a mask in which the
+            // objects past 65535 have silently become background or merged into low-numbered ones.
+            throw new IOException(String.format(
+                    "Cellpose returned %d objects for a single %dx%d tile, but at most %d can be represented. "
+                            + "Reduce the tile size (CellposeBuilder.tileSize) so each tile holds fewer objects.",
+                    max, width, height, MAX_LABELS_PER_TILE));
         }
         return new ShortProcessor(width, height, pixels, null);
     }
