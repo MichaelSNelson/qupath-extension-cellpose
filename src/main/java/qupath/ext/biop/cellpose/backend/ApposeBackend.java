@@ -248,15 +248,19 @@ public class ApposeBackend implements CellposeBackend {
         }
         logger.info("Shutting down {} Cellpose Python worker(s)", WORKERS.size());
         WORKERS.values().forEach(w -> {
-            try {
-                ApposeEnvironments.withExtensionClassLoader(() -> {
-                    w.service.close();
-                    return null;
-                });
-            } catch (Exception e) {
-                logger.warn("Error closing Appose Cellpose service: {}", e.getMessage(), e);
-            } finally {
-                LIVE_SERVICES.remove(w.service);
+            // Wait for the tile in flight: this method is reachable from a menu item while a run is
+            // in progress, and closing the service under a running model.eval kills it mid-tile.
+            synchronized (w.lock) {
+                try {
+                    ApposeEnvironments.withExtensionClassLoader(() -> {
+                        w.service.close();
+                        return null;
+                    });
+                } catch (Exception e) {
+                    logger.warn("Error closing Appose Cellpose service: {}", e.getMessage(), e);
+                } finally {
+                    LIVE_SERVICES.remove(w.service);
+                }
             }
         });
         WORKERS.clear();
