@@ -125,7 +125,6 @@ public class ApposeChannelMatrixLiveTest {
                 .diameter(30)
                 .flowThreshold(0.4)
                 .cellprobThreshold(0.0)
-                .useGpu(true)
                 .do3D(false);
         builder.channel1(c.chan1());
         builder.channel2(c.chan2());

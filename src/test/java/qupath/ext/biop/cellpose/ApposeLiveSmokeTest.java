@@ -69,7 +69,6 @@ public class ApposeLiveSmokeTest {
                 .diameter(30)
                 .flowThreshold(0.4)
                 .cellprobThreshold(0.0)
-                .useGpu(true)
                 .do3D(false)
                 .build();
 

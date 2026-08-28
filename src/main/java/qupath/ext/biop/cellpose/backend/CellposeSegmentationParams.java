@@ -31,7 +31,6 @@ public final class CellposeSegmentationParams {
     private final double diameter;
     private final double flowThreshold;
     private final double cellprobThreshold;
-    private final boolean useGpu;
     private final boolean do3D;
     private final CellposeDevice device;
 
@@ -44,7 +43,6 @@ public final class CellposeSegmentationParams {
         this.diameter = builder.diameter;
         this.flowThreshold = builder.flowThreshold;
         this.cellprobThreshold = builder.cellprobThreshold;
-        this.useGpu = builder.useGpu;
         this.do3D = builder.do3D;
         this.device = builder.device;
     }
@@ -84,6 +82,7 @@ public final class CellposeSegmentationParams {
         return channel2;
     }
 
+    /** @return the expected object diameter in PIXELS at the analysis resolution, or 0 to let Cellpose estimate it */
     public double getDiameter() {
         return diameter;
     }
@@ -96,9 +95,6 @@ public final class CellposeSegmentationParams {
         return cellprobThreshold;
     }
 
-    public boolean isUseGpu() {
-        return useGpu;
-    }
 
     public boolean isDo3D() {
         return do3D;
@@ -130,7 +126,6 @@ public final class CellposeSegmentationParams {
         private double diameter = 30.0;
         private double flowThreshold = 0.4;
         private double cellprobThreshold = 0.0;
-        private boolean useGpu = true;
         private boolean do3D = false;
         private CellposeDevice device = CellposeDevice.AUTO;
 
@@ -174,10 +169,6 @@ public final class CellposeSegmentationParams {
             return this;
         }
 
-        public Builder useGpu(boolean useGpu) {
-            this.useGpu = useGpu;
-            return this;
-        }
 
         public Builder do3D(boolean do3D) {
             this.do3D = do3D;

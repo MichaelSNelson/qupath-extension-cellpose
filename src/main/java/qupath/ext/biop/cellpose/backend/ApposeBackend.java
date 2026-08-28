@@ -510,7 +510,11 @@ public class ApposeBackend implements CellposeBackend {
                 + " attempts: Appose worker thread died each time", last);
     }
 
-    /** True if this failure is the transient Appose worker "thread death", not a Python error. */
+    /**
+     * True if this failure is Appose reporting {@code Task failed: thread death} -- a worker task
+     * thread that died before reporting completion, most often on the first task after a service
+     * starts -- rather than an error raised by Python.
+     */
     private static boolean isThreadDeath(Throwable t) {
         for (Throwable cause = t; cause != null; cause = cause.getCause()) {
             String message = cause.getMessage();

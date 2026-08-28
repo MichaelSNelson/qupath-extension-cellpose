@@ -183,6 +183,7 @@ final class NDArrays {
      * @param height the label image height
      * @return a freshly allocated NDArray; the caller must close it
      */
+    // Python writes labels into this buffer in place; there is no return value to read.
     static NDArray allocateLabels(int width, int height) {
         Shape shape = new Shape(Order.C_ORDER, height, width);
         return new NDArray(DType.UINT32, shape);

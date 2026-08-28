@@ -475,7 +475,7 @@ public class Cellpose2D {
                     .collect(Collectors.toList());
         }).flatMap(List::stream).collect(Collectors.toList());
 
-        // Here the files are saved, and we can run cellpose to recover the masks
+        // Tiles are ready -- on disk for the subprocess backend, in memory for the Appose one
 
         try (CellposeBackend backend = createDetectionBackend()) {
             backend.run(allTiles, buildSegmentationParams());
@@ -923,7 +923,6 @@ public class Cellpose2D {
 
         CellposeSegmentationParams.Builder builder = CellposeSegmentationParams.builder()
                 .cellposeSam(this.useCellposeSAM)
-                .useGpu(!this.disableGPU)
                 .device(resolvedDevice)
                 .model(this.model)
                 .customModel(new File(this.model).exists());
