@@ -57,6 +57,34 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
 
     // Persistent preference selecting the compute device for the in-process (Appose) transport:
     // AUTO detects a GPU, GPU forces the CUDA environment, CPU forces the CPU environment.
+    /**
+     * Directory that will CONTAIN the in-process backend's Python environment, or empty for the
+     * Appose default ({@code ~/.local/share/appose}). Configurable because the environment is
+     * several GB: on a shared workstation every user otherwise gets their own copy on the system
+     * drive, and some sites keep large caches off C: entirely.
+     */
+    private static final StringProperty cellposeApposeEnvDir =
+            PathPrefs.createPersistentPreference("cellposeApposeEnvDir", "");
+
+    /**
+     * @return the directory chosen to hold the Appose environment, or an empty string to use the
+     * Appose default location
+     */
+    public static String getApposeEnvDirPreference() {
+        String value = cellposeApposeEnvDir.get();
+        return value == null ? "" : value.strip();
+    }
+
+    /**
+     * Record where the Appose environment should live. Used by the first-run prompt so the choice
+     * persists, rather than being asked again on the next build.
+     *
+     * @param dir the containing directory, or empty/null for the Appose default
+     */
+    public static void setApposeEnvDirPreference(String dir) {
+        cellposeApposeEnvDir.set(dir == null ? "" : dir.strip());
+    }
+
     private static final ObjectProperty<CellposeDevice> cellposeApposeDevice =
             PathPrefs.createPersistentPreference("cellposeApposeDevice", CellposeDevice.AUTO, CellposeDevice.class);
 
@@ -155,6 +183,19 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
                 .description("How to run Cellpose for detection:\nSUBPROCESS (default): launch an external Python process (uses the python.exe paths above).\nAPPOSE (experimental): run Cellpose in-process through Appose, building its own Python environment automatically.")
                 .build();
 
+        PropertySheet.Item apposeEnvDirItem = new PropertyItemBuilder<>(cellposeApposeEnvDir, String.class)
+                .propertyType(PropertyItemBuilder.PropertyType.DIRECTORY)
+                .name("Cellpose Appose environment directory")
+                .category("Cellpose/Omnipose")
+                .description("Where the in-process (Appose) transport keeps its Python environment.\n"
+                        + "Leave empty for the default location (~/.local/share/appose).\n"
+                        + "The environment is several GB, so on a shared workstation it is worth putting it "
+                        + "somewhere other than the system drive.\n"
+                        + "Changing this after the environment is built leaves the old one in place; delete it "
+                        + "yourself to reclaim the space.\n"
+                        + "Avoid paths containing spaces -- pixi cannot build in them.")
+                .build();
+
         PropertySheet.Item deviceItem = new PropertyItemBuilder<>(cellposeApposeDevice, CellposeDevice.class)
                 .propertyType(PropertyItemBuilder.PropertyType.GENERAL)
                 .name("Cellpose Appose device")
@@ -163,7 +204,7 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
                 .build();
 
         // Add Permanent Preferences and Populate Preferences
-        QuPathGUI.getInstance().getPreferencePane().getPropertySheet().getItems().addAll(cellposePathItem, cellposeSAMPathItem, omniposePathItem, condaPathItem, transportItem, deviceItem);
+        QuPathGUI.getInstance().getPreferencePane().getPropertySheet().getItems().addAll(cellposePathItem, cellposeSAMPathItem, omniposePathItem, condaPathItem, transportItem, deviceItem, apposeEnvDirItem);
 
         // Add a menu item to open the Python console, which surfaces the in-process backend's
         // Python diagnostics (the Appose IPC channel reserves stdout, so this is the only runtime view).

@@ -21,9 +21,11 @@ import org.apposed.appose.BuildException;
 import org.apposed.appose.Environment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.biop.cellpose.CellposeExtension;
 import qupath.ext.biop.cellpose.ui.PythonConsoleWindow;
 
 import java.awt.GraphicsEnvironment;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -97,8 +99,15 @@ final class ApposeEnvironments {
                 String pixiToml = readResource("pixi.toml");
                 String pixiLock = readResource("pixi.lock");
 
+                // Ask before the first build, not after: the environment is several GB, and once it
+                // is downloaded to the wrong drive the only remedy is to delete it and start over.
+                // Only when nothing is configured and nothing is built yet -- never re-ask, and
+                // never override a choice the user already made in the preferences.
+                promptForEnvironmentLocationOnFirstRun();
+
                 Path envDir = getEnvironmentPath();
                 boolean firstBuild = !Files.exists(envDir.resolve(".pixi"));
+                warnIfUnsuitable(getEnvironmentBase());
 
                 // Stage the manifest AND the committed lock, so every user installs the exact
                 // dependency tree this was tested against instead of re-resolving. The lock is
@@ -173,10 +182,14 @@ final class ApposeEnvironments {
         try {
             return withExtensionClassLoader(() -> Appose.pixi()
                     .content(pixiToml)
-                    // Keep this extension's environment out of the Fiji plugin's directory; see
-                    // ENV_DIR_NAME. Must stay in step with getEnvironmentPath(), which stages the
-                    // manifest and lock into the same place.
-                    .name(ENV_DIR_NAME)
+                    // base() sets Appose's envDir FIELD -- the environment directory itself, not
+                    // a parent to append name() to (verified in BaseBuilder bytecode: base ->
+                    // envDir, name -> envName, and envName is only consulted when envDir is unset).
+                    // So pass the full path, which is also what stages the manifest and lock, and
+                    // do not set name() as well: passing a parent here builds the environment one
+                    // level up from where the manifest was staged, which then silently resolves a
+                    // second copy.
+                    .base(getEnvironmentPath().toFile())
                     .subscribeProgress((title, current, maximum) -> {
                         String line = "Cellpose env build: " + title + " (" + current + "/" + maximum + ")";
                         logger.info(line);
@@ -296,9 +309,75 @@ final class ApposeEnvironments {
         }
     }
 
+    /**
+     * On the very first build, offer to put the multi-GB environment somewhere other than the
+     * default. Does nothing when a location is already configured, when an environment already
+     * exists anywhere we would look, or when there is no GUI to ask through -- a scripted or
+     * headless run must never block on a dialog.
+     */
+    private static void promptForEnvironmentLocationOnFirstRun() {
+        if (!CellposeExtension.getApposeEnvDirPreference().isEmpty())
+            return; // the user has already chosen
+        if (Files.exists(getEnvironmentPath().resolve(".pixi")))
+            return; // already built in the default location; leave it alone
+        if (GraphicsEnvironment.isHeadless())
+            return;
+
+        try {
+            Path defaultBase = getEnvironmentBase();
+            boolean choose = qupath.fx.dialogs.Dialogs.showYesNoDialog(
+                    "Cellpose",
+                    "The in-process (Appose) backend needs to build a Python environment of several "
+                            + "gigabytes.\n\nIt will go in:\n" + defaultBase + "\n\n"
+                            + "Choose a different location?\n\n"
+                            + "This is worth doing on a shared workstation, where every user would "
+                            + "otherwise get their own copy on the system drive. You can change it later "
+                            + "in Edit > Preferences > Cellpose.");
+            if (!choose)
+                return;
+
+            File chosen = qupath.fx.dialogs.FileChoosers.promptForDirectory(
+                    "Where should the Cellpose Python environment go?", defaultBase.toFile());
+            if (chosen == null)
+                return; // cancelled: fall through to the default
+
+            CellposeExtension.setApposeEnvDirPreference(chosen.getAbsolutePath());
+            logger.info("Cellpose Appose environment directory set to {}", chosen.getAbsolutePath());
+        } catch (RuntimeException e) {
+            // Never let the prompt itself stop a run; the default location is always usable.
+            logger.debug("Could not prompt for the environment location: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * @return the directory that will CONTAIN the environment: the user's chosen location, or the
+     * Appose default when the preference is empty
+     */
+    static Path getEnvironmentBase() {
+        String configured = CellposeExtension.getApposeEnvDirPreference();
+        if (!configured.isEmpty())
+            return Paths.get(configured);
+        return Paths.get(System.getProperty("user.home"), ".local", "share", "appose");
+    }
+
     /** @return the directory Appose installs the Cellpose environment into. */
     private static Path getEnvironmentPath() {
-        return Paths.get(System.getProperty("user.home"), ".local", "share", "appose", ENV_DIR_NAME);
+        return getEnvironmentBase().resolve(ENV_DIR_NAME);
+    }
+
+    /**
+     * Warn about a base directory pixi cannot build in. A path containing spaces breaks
+     * {@code pixi run --manifest-path}, and the resulting failure names neither the path nor the
+     * space, so it is worth saying plainly before the multi-GB download rather than after.
+     *
+     * @param base the chosen containing directory
+     */
+    private static void warnIfUnsuitable(Path base) {
+        if (base.toString().contains(" ")) {
+            logger.warn("The Cellpose Appose environment directory contains a space: {}. "
+                    + "pixi cannot build in such a path; choose a directory without spaces in "
+                    + "Edit > Preferences > Cellpose.", base);
+        }
     }
 
     /**

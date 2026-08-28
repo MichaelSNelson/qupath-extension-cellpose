@@ -237,6 +237,18 @@ specified, assuming it is dim 0`) and returns an empty mask without raising an e
 number that does not exist in the exported tile is now reported as such, rather than surfacing as
 an index error from inside Python.
 
+### Where the environment lives
+
+By default the environment goes to Appose's usual location
+(`~/.local/share/appose/qupath-cellpose-appose`). Set **Cellpose Appose environment directory** in
+`Edit > Preferences > Cellpose` to put it somewhere else, and the first build offers the choice up
+front rather than after the download.
+
+This matters on a shared workstation: the environment is several GB, and without it every user
+ends up with their own copy on the system drive. Note that pixi cannot build in a path containing
+spaces. Changing the setting after the environment exists leaves the old one in place -- delete it
+yourself to reclaim the space.
+
 ### Python environment
 
 The Appose path installs its environment from the committed
