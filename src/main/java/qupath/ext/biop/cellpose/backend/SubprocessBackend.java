@@ -41,15 +41,8 @@ import java.util.stream.Collectors;
  * The default Cellpose backend: runs Cellpose (or Omnipose) as an external Python process through a
  * {@link VirtualEnvironmentRunner}, exchanging images through temporary TIFF files.
  * <p>
- * This class holds the Cellpose-detection run logic that used to live in
- * {@code Cellpose2D.runCellpose(...)} and {@code Cellpose2D.processCellposeFiles(...)}. It was
- * relocated here verbatim as part of introducing the pluggable {@link CellposeBackend} seam; the
- * command-line arguments, temporary-file naming and file processing are unchanged so that the
- * default transport behaves byte-for-byte as before. The one adaptation is that the mask reader is
- * invoked through the {@code tileReader} callback supplied by {@code Cellpose2D} (which delegates to
- * the unchanged {@code readObjectsFromTileFile}), so the reader itself stays in {@code Cellpose2D}.
- * The {@link VirtualEnvironmentRunner} factory also stays in {@code Cellpose2D} (training and QC
- * share it) and is provided here as a {@link Supplier}.
+ * The mask reader and the {@link VirtualEnvironmentRunner} factory stay in {@code Cellpose2D},
+ * which training and QC also use; both are supplied here at construction.
  */
 public class SubprocessBackend implements CellposeBackend {
 
@@ -96,8 +89,7 @@ public class SubprocessBackend implements CellposeBackend {
      * {@inheritDoc}
      * <p>
      * The {@link CellposeSegmentationParams} argument is ignored: the external Cellpose command is
-     * built from the raw flag map supplied at construction, to keep the command byte-for-byte
-     * identical to the historical behaviour.
+     * built from the raw flag map supplied at construction.
      */
     @Override
     public void run(List<TileFile> allTiles, CellposeSegmentationParams params) throws InterruptedException, IOException {

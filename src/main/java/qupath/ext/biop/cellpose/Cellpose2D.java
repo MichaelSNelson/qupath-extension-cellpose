@@ -456,9 +456,6 @@ public class Cellpose2D {
             ImageDataOp opWithPreprocessing = op.appendOps(fullPreprocess.toArray(ImageOp[]::new));
 
 
-            // The subprocess backend needs every tile on disk before Cellpose is launched over the
-            // directory. The in-process backend does not: it produces each tile's pixels on demand
-            // and gets the labels back in memory, so nothing is written at all.
             if (writesTilesToDisk()) {
                 logger.info("Saving images for {} tiles", tiles.size());
                 return tiles.parallelStream()
@@ -479,7 +476,6 @@ public class Cellpose2D {
         }).flatMap(List::stream).collect(Collectors.toList());
 
         // Here the files are saved, and we can run cellpose to recover the masks
-        // The transport (external subprocess, the default, or in-process Appose) is chosen here.
 
         try (CellposeBackend backend = createDetectionBackend()) {
             backend.run(allTiles, buildSegmentationParams());
@@ -798,10 +794,8 @@ public class Cellpose2D {
     }
 
     /**
-     * Describe a tile without materialising it, for the in-process (Appose) backend. The pixels are
-     * produced on demand by the backend, one tile per worker thread, and the label image comes back
-     * in memory - so neither the input tile nor its mask is ever written to disk. The file name is
-     * still computed, because it is what identifies the tile in log messages.
+     * Describe a tile without materialising it, for the in-process backend. The file name is still
+     * computed, because it is what identifies the tile in log messages.
      *
      * @param op        the ops to apply to the tile
      * @param imageData the current ImageData
@@ -873,9 +867,8 @@ public class Cellpose2D {
     }
 
     /**
-     * Whether the transport chosen for this run needs each tile written to disk before Cellpose is
-     * started. The external subprocess is pointed at a directory and reads the tiles from it; the
-     * in-process backend takes the pixels directly, so it needs no files.
+     * Whether the transport chosen for this run needs each tile written to disk: the external
+     * subprocess is pointed at a directory, while the in-process backend takes the pixels directly.
      *
      * @return true if tiles must be written to the temporary directory
      */
@@ -885,16 +878,14 @@ public class Cellpose2D {
     }
 
     /**
-     * Create the backend that will run Cellpose for detection. The builder flag (if set through
-     * {@link CellposeBuilder#transport(CellposeTransport)}/{@link CellposeBuilder#useAppose()})
-     * takes precedence; otherwise the extension-wide preference is honored. The default is the
-     * external subprocess transport, which is unchanged from the historical behaviour.
+     * Create the backend that will run Cellpose for detection: the builder flag if set, otherwise
+     * the extension-wide preference, otherwise the external subprocess transport.
      *
      * @return a ready-to-use {@link CellposeBackend}
      */
     private CellposeBackend createDetectionBackend() {
         CellposeTransport chosen = CellposeBackend.resolveTransport(this.transport, CellposeExtension.getTransportPreference());
-        // The mask reader stays in this class (unchanged); both backends invoke it through this callback.
+        // The mask reader stays in this class; both backends invoke it through this callback.
         Consumer<TileFile> tileReader = tile -> tile.setCandidates(readObjectsFromTileFile(tile));
         if (chosen == CellposeTransport.APPOSE) {
             logger.info("Running Cellpose with the in-process (Appose) backend");
@@ -906,14 +897,9 @@ public class Cellpose2D {
     }
 
     /**
-     * Create the backend used by the training-support paths (currently the validation-image
-     * inference that produces QC labels). Unlike {@link #createDetectionBackend()}, this
-     * <b>always</b> uses the external subprocess transport and never consults the detection
-     * transport preference or builder flag: the in-process (Appose) path implements inference
-     * only -- it has no training or validation entry point -- so training and its QC always run
-     * through the conventional subprocess Cellpose install configured in Preferences. Kept as an
-     * explicit, package-private mirror of {@link #createDetectionBackend()} so this isolation is
-     * unit-testable and cannot silently regress if the training code is refactored.
+     * Create the backend used by the training-support paths. This <b>always</b> uses the external
+     * subprocess transport and never consults the detection transport preference or builder flag,
+     * because the in-process backend implements inference only.
      *
      * @return a subprocess backend for training-support Cellpose runs (no result reader attached)
      */
@@ -924,14 +910,13 @@ public class Cellpose2D {
 
     /**
      * Distill the Cellpose flag map into a {@link CellposeSegmentationParams} value object for the
-     * in-process backend. The external subprocess backend does not use this (it builds its command
-     * from the raw flag map).
+     * in-process backend, which the subprocess backend does not use.
      *
      * @return the segmentation parameters
      */
     private CellposeSegmentationParams buildSegmentationParams() {
-        // Resolve the device: an explicit builder device wins; otherwise the legacy disableGPU flag
-        // forces CPU; otherwise the extension-wide preference (AUTO by default) applies.
+        // Device precedence: an explicit builder device, then the disableGPU flag, then the
+        // extension-wide preference.
         CellposeDevice resolvedDevice = CellposeBackend.resolveDevice(this.device, CellposeExtension.getDevicePreference());
         if (this.device == null && this.disableGPU)
             resolvedDevice = CellposeDevice.CPU;
@@ -1058,8 +1043,7 @@ public class Cellpose2D {
         this.model = this.modelFile.getAbsolutePath();
 
         try {
-            // Validation runs Cellpose only (no result reading), always through the subprocess
-            // transport, so the QC path is unaffected by the detection transport preference.
+            // Cellpose only, with no result reading.
             CellposeBackend backend = createTrainingSupportBackend();
             backend.run(null, null);
         } catch (InterruptedException | IOException e) {
@@ -1480,7 +1464,7 @@ public class Cellpose2D {
         RegionRequest request = tileFile.getTile();
 
         // The in-process backend hands the labels back in memory; the subprocess backend writes
-        // them to disk for Cellpose-compatible tooling, so read them from there.
+        // them to disk.
         ImagePlus label_imp = null;
         ImageProcessor ip = tileFile.getLabels();
         if (ip == null) {
@@ -1534,8 +1518,7 @@ public class Cellpose2D {
         }
         if (label_imp != null)
             label_imp.close();
-        // Tracing consumed the labels (it erases each ROI as it goes), so drop the pixels now rather
-        // than retaining every tile's mask for the lifetime of the run.
+        // Tracing erases each ROI as it goes, so the labels are spent.
         tileFile.clearLabels();
         return rois;
     }

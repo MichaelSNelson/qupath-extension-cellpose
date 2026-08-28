@@ -17,11 +17,9 @@
 package qupath.ext.biop.cellpose.backend;
 
 /**
- * Small immutable value object describing the Cellpose parameters that the {@link ApposeBackend}
- * needs, decoupled from the {@code CellposeBuilder}/{@code Cellpose2D} internals.
- * <p>
- * This is Apache-2.0 original work for this fork. It intentionally exposes only the subset of
- * Cellpose options that the in-process transport supports in this first version.
+ * Immutable value object describing the Cellpose parameters the {@link ApposeBackend} needs,
+ * decoupled from the {@code CellposeBuilder}/{@code Cellpose2D} internals. It carries only the
+ * subset of Cellpose options the in-process transport supports.
  */
 public final class CellposeSegmentationParams {
 
@@ -73,14 +71,14 @@ public final class CellposeSegmentationParams {
     }
 
     /**
-     * @return the first (cyto) channel index, or null if unset
+     * @return cellpose's {@code --chan} value (1-based, 0 for grayscale), or null if unset
      */
     public Integer getChannel1() {
         return channel1;
     }
 
     /**
-     * @return the second (nucleus) channel index, or null if unset
+     * @return cellpose's {@code --chan2} value (1-based, 0 for grayscale), or null if unset
      */
     public Integer getChannel2() {
         return channel2;

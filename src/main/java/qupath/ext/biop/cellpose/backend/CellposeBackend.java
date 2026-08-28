@@ -22,22 +22,14 @@ import java.io.IOException;
 import java.util.List;
 
 /**
- * A pluggable backend that runs Cellpose segmentation on a set of already-saved input tiles and
- * makes the resulting detections available on each tile.
+ * A pluggable backend that runs Cellpose segmentation on a set of input tiles and makes the
+ * resulting detections available on each tile.
  * <p>
- * Two implementations are provided:
- * <ul>
- *     <li>{@link SubprocessBackend} - the default, unchanged external-process transport that
- *     exchanges images through temporary TIFF files;</li>
- *     <li>{@link ApposeBackend} - an opt-in in-process transport based on Appose.</li>
- * </ul>
- * <p>
- * Whichever backend is used, the contract is the same: after {@link #run(List, CellposeSegmentationParams)}
- * returns, every tile in the list has had its candidate detections populated (through the tile
- * reader that the owning {@code Cellpose2D} supplies at construction time). Everything downstream
- * (overlap resolution, measurements, ...) is therefore independent of the chosen transport.
- * <p>
- * This is Apache-2.0 original work for this fork.
+ * Two implementations are provided: {@link SubprocessBackend}, the default, which exchanges images
+ * with an external Python process through temporary TIFF files, and {@link ApposeBackend}, an
+ * opt-in in-process transport based on Appose. Whichever is used, the contract is the same: after
+ * {@link #run(List, CellposeSegmentationParams)} returns, every tile has had its candidate
+ * detections populated through the tile reader the owning {@code Cellpose2D} supplied.
  */
 public interface CellposeBackend extends AutoCloseable {
 
@@ -55,17 +47,13 @@ public interface CellposeBackend extends AutoCloseable {
      */
     void run(List<TileFile> tiles, CellposeSegmentationParams params) throws IOException, InterruptedException;
 
-    /**
-     * Release any resources held by this backend (e.g. a persistent Appose service).
-     * The subprocess backend holds no resources and closing it is a no-op.
-     */
+    /** Release any resources held by this backend. */
     @Override
     void close();
 
     /**
-     * Resolve which transport to use, given an optional builder-level override and the
-     * extension-wide preference. A non-null builder flag always wins; otherwise the preference is
-     * used; if both are null, the default {@link CellposeTransport#SUBPROCESS} is returned.
+     * Resolve which transport to use: the builder-level override if set, then the extension-wide
+     * preference, then {@link CellposeTransport#SUBPROCESS}.
      *
      * @param builderTransport the transport set on the builder, or null if unset
      * @param preference       the extension-wide preference, or null
@@ -80,10 +68,8 @@ public interface CellposeBackend extends AutoCloseable {
     }
 
     /**
-     * Resolve which compute device the in-process backend should target, given an optional
-     * builder-level override and the extension-wide preference. A non-null builder value always
-     * wins; otherwise the preference is used; if both are null, {@link CellposeDevice#AUTO} is
-     * returned.
+     * Resolve which compute device the in-process backend should target: the builder-level override
+     * if set, then the extension-wide preference, then {@link CellposeDevice#AUTO}.
      *
      * @param builderDevice the device set on the builder, or null if unset
      * @param preference    the extension-wide preference, or null

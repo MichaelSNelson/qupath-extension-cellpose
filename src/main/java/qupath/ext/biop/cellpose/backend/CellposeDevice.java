@@ -17,29 +17,18 @@
 package qupath.ext.biop.cellpose.backend;
 
 /**
- * The compute device the in-process {@link ApposeBackend} should run Cellpose on.
- * <p>
- * This is Apache-2.0 original work for this fork. The resolved device controls both which pixi
- * sub-environment is activated (a CUDA-enabled {@code cuNNN} variant vs the {@code cpu} variant)
- * and the {@code use_gpu} flag handed to the Cellpose scripts.
+ * The compute device the in-process {@link ApposeBackend} should run Cellpose on. It controls both
+ * which pixi sub-environment is activated (a CUDA-enabled {@code cuNNN} variant vs the {@code cpu}
+ * variant) and the {@code use_gpu} flag handed to the Cellpose scripts.
  */
 public enum CellposeDevice {
 
-    /**
-     * Detect a usable GPU automatically (the default). Uses {@link ApposeEnvironments} GPU
-     * detection; falls back to CPU when no NVIDIA GPU is found (and always on macOS, which has no
-     * CUDA).
-     */
+    /** Detect a usable GPU automatically (the default), falling back to CPU when none is found. */
     AUTO,
 
-    /**
-     * Force GPU: activate the CUDA sub-environment and request GPU execution regardless of
-     * detection. Cellpose itself still falls back to CPU at runtime if no usable device is present.
-     */
+    /** Activate the CUDA sub-environment and request GPU execution regardless of detection. */
     GPU,
 
-    /**
-     * Force CPU: activate the CPU sub-environment and request CPU execution.
-     */
+    /** Activate the CPU sub-environment and request CPU execution. */
     CPU
 }

@@ -32,11 +32,8 @@ import java.util.function.Supplier;
  * Holds the correspondence between a {@link RegionRequest} and a saved input tile image on disk,
  * and infers the resulting Cellpose label ("mask") file name.
  * <p>
- * This used to be a private static inner class of {@link Cellpose2D}. It was promoted to a
- * package-visible top-level type so that the pluggable segmentation backends in
- * {@code qupath.ext.biop.cellpose.backend} can share it (the backend package only needs the
- * public accessors below; candidate storage stays package-private to {@code qupath.ext.biop.cellpose}).
- * The behaviour is otherwise unchanged.
+ * The public accessors are what the segmentation backends in
+ * {@code qupath.ext.biop.cellpose.backend} need; candidate storage stays package-private.
  *
  * @author Olivier Burri
  */
@@ -47,14 +44,13 @@ public class TileFile {
 
     /**
      * Produces the tile image on demand instead of reading it from {@link #imageFile}. Set only for
-     * the in-process (Appose) backend, which never writes the tile to disk; null for the subprocess
-     * backend, which must have the file on disk for Cellpose to find.
+     * the in-process backend; null for the subprocess backend, which needs the file on disk.
      */
     private final Supplier<ImagePlus> imageSupplier;
 
     /**
-     * Label image handed back in memory by the in-process backend, instead of being written to and
-     * re-read from {@link #getLabelFile()}. Null when the masks came from (or must go to) disk.
+     * Label image handed back in memory by the in-process backend. Null when the masks came from
+     * (or must go to) {@link #getLabelFile()}.
      */
     private ImageProcessor labels;
 
@@ -72,16 +68,15 @@ public class TileFile {
     }
 
     /**
-     * @return the input tile image on disk. For the in-process backend this file is never written;
-     * the path is still used to name the tile in logs. Use {@link #openImage()} to obtain the pixels.
+     * @return the input tile image on disk, which the in-process backend never writes but still uses
+     * to name the tile in logs. Use {@link #openImage()} to obtain the pixels.
      */
     public File getImageFile() {
         return imageFile;
     }
 
     /**
-     * Obtain the tile image, either by computing it on demand (in-process backend) or by reading the
-     * file Cellpose was given (subprocess backend).
+     * Obtain the tile image, either on demand or by reading the file Cellpose was given.
      *
      * @return the tile image, or null if it could not be produced
      */
@@ -107,7 +102,7 @@ public class TileFile {
     }
 
     /**
-     * Hand back the label image in memory, so no mask file needs to be written or re-read.
+     * Hand back the label image in memory, so no mask file is written or re-read.
      *
      * @param labels the label image
      */
@@ -115,10 +110,7 @@ public class TileFile {
         this.labels = labels;
     }
 
-    /**
-     * Release the label pixels once candidates have been extracted, so a long run does not retain
-     * every tile's masks.
-     */
+    /** Release the label pixels once candidates have been extracted. */
     void clearLabels() {
         this.labels = null;
     }

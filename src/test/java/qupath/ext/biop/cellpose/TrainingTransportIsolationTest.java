@@ -27,15 +27,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 /**
- * Regression guard for a design invariant: the training and QC (validation-image) paths always run
- * through the external subprocess transport, independent of the detection transport preference or
- * builder flag. The in-process (Appose) backend implements inference only; it has no training or
- * validation entry point, so selecting {@link CellposeTransport#APPOSE} for detection must never
- * route training or its QC through Appose.
- * <p>
- * This asserts the code-level isolation only. Custom-model <em>training</em> itself is not exercised
- * here (it requires a configured Cellpose training environment and real ground-truth data) and has
- * not been tested against this change end-to-end -- see the README/NOTICE caveat.
+ * Guards the invariant that the training and QC paths always run through the external subprocess
+ * transport, whatever detection transport is selected, because the in-process backend implements
+ * inference only. Training itself is not exercised here.
  */
 class TrainingTransportIsolationTest {
 
@@ -53,7 +47,6 @@ class TrainingTransportIsolationTest {
     @Test
     void trainingSupportStaysSubprocessWhenApposeSelected() {
         Cellpose2D cellpose = instanceWithTransport(CellposeTransport.APPOSE);
-        // Precondition: this instance really does request the in-process (Appose) detection transport.
         assertEquals(CellposeTransport.APPOSE, cellpose.transport);
         CellposeBackend backend = cellpose.createTrainingSupportBackend();
         assertInstanceOf(SubprocessBackend.class, backend,

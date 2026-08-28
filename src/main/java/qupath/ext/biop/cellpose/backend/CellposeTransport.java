@@ -16,23 +16,15 @@
 
 package qupath.ext.biop.cellpose.backend;
 
-/**
- * The transport used to run Cellpose from within QuPath.
- * <p>
- * This is Apache-2.0 original work for this fork.
- */
+/** The transport used to run Cellpose from within QuPath. */
 public enum CellposeTransport {
 
     /**
      * Run Cellpose as an external Python process, exchanging images through temporary TIFF files.
-     * This is the default and historical behaviour of the extension.
+     * This is the default.
      */
     SUBPROCESS,
 
-    /**
-     * Run Cellpose in-process through Appose, exchanging images through shared memory.
-     * This is an opt-in alternative; the environment build/service lifecycle is adapted from the
-     * BSD-3-Clause imglib2-cellpose project (see NOTICE).
-     */
+    /** Run Cellpose in-process through Appose, exchanging images through shared memory. */
     APPOSE
 }

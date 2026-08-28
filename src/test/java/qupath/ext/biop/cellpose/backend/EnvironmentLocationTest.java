@@ -25,9 +25,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 /**
- * The Appose environment is several gigabytes, so where it lands is a real decision on a shared
- * workstation rather than a detail. These pin the two halves of that: an unset preference must keep
- * the historical default, and a set one must be honoured exactly.
+ * Tests for where the Appose environment is installed: an unset preference falls back to the Appose
+ * default, and a set one is honoured exactly.
  */
 public class EnvironmentLocationTest {
 
@@ -51,8 +50,6 @@ public class EnvironmentLocationTest {
 
     @Test
     void surroundingWhitespaceIsIgnored() {
-        // Paths get pasted into the preference field; a stray space would otherwise become a
-        // directory name that pixi cannot build in.
         CellposeExtension.setApposeEnvDirPreference("  /data/shared/appose  ");
         Assertions.assertEquals(Paths.get("/data/shared/appose"), ApposeEnvironments.getEnvironmentBase());
     }

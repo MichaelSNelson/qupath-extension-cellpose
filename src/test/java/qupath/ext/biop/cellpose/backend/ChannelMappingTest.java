@@ -20,17 +20,14 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 /**
- * The builder's {@code cellposeChannels(a, b)} carries cellpose's {@code --chan}/{@code --chan2}:
- * 1-based, with {@code 0} meaning grayscale. {@code cp4.py} instead slices the channel axis with
- * plain 0-based indices. These tests pin the translation between the two, and the bounds checks
- * that turn a mis-set script into a readable message instead of a Python IndexError.
+ * Tests for the translation between cellpose's {@code --chan}/{@code --chan2} numbers (1-based,
+ * {@code 0} meaning grayscale) and the 0-based indices {@code cp4.py} slices with, plus the bounds
+ * checks that report a mis-set channel in Java rather than as a Python IndexError.
  */
 public class ChannelMappingTest {
 
     @Test
     void unspecifiedChannelsUseTheWholeTile() {
-        // Every shipped example script leaves cellposeChannels() unset; Cellpose-SAM should then
-        // see all exported channels, exactly as it does through the subprocess backend.
         Assertions.assertArrayEquals(new int[] {0}, ApposeBackend.resolveCp4Channels(0, null, 1));
         Assertions.assertArrayEquals(new int[] {0, 1}, ApposeBackend.resolveCp4Channels(0, null, 2));
         Assertions.assertArrayEquals(new int[] {0, 1, 2}, ApposeBackend.resolveCp4Channels(null, null, 3));
@@ -58,8 +55,6 @@ public class ChannelMappingTest {
 
     @Test
     void outOfRangeChannelIsReportedAgainstTheExportedTile() {
-        // The pre-fix bug: cellposeChannels(1, 2) sent as raw indices ran off the end of a
-        // two-channel tile inside Python. It must now fail in Java with an actionable message.
         IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
                 () -> ApposeBackend.resolveCp4Channels(2, 3, 2));
         Assertions.assertTrue(e.getMessage().contains("only has 2 channel(s)"), e.getMessage());
@@ -77,8 +72,6 @@ public class ChannelMappingTest {
 
     @Test
     void cellpose3GrayscaleOverManyChannelsIsAveragedInJava() {
-        // Above three channels Cellpose reads the channel axis as a Z axis and silently returns an
-        // empty mask, so the grayscale average that its [0, 0] spec implies is done here instead.
         ApposeBackend.Cp3Layout layout = ApposeBackend.Cp3Layout.resolve(0, null, 7);
         Assertions.assertNull(layout.bands(), "null bands means 'average every channel'");
         Assertions.assertEquals(1, layout.packedChannels());

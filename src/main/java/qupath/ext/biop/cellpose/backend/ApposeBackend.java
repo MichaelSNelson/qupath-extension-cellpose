@@ -50,30 +50,12 @@ import java.util.function.Consumer;
 /**
  * In-process Cellpose segmentation backend based on Appose.
  * <p>
- * This is Apache-2.0 original work. Nothing touches the disk: for each tile the backend obtains the
- * pixels from {@code Cellpose2D} on demand, converts them to an Appose {@link NDArray} in shared
- * memory (through {@link NDArrays}), submits the vendored Cellpose script for the requested model
- * family, reads the label {@link NDArray} back, and hands it to the tile reader in memory. (A tile
- * that does have a file behind it - which only happens if one is constructed the subprocess way - is
- * still read from and written to disk, so the two paths can coexist.)
+ * Tile pixels are passed to Python as shared-memory {@link NDArray}s and the labels are read back
+ * the same way; a tile that has a file behind it is still read from and written to disk. Tiles are
+ * processed by a bounded pool, but the Cellpose call itself is serialized (see {@link #pythonLock}).
  * <p>
- * Tiles are processed by a bounded pool sized from QuPath's parallelism setting, so at most that
- * many tiles hold pixels at once and memory does not scale with the size of the region. The Cellpose
- * call itself is serialized: Appose multiplexes all tasks over one worker process and the vendored
- * scripts cache the model in a single Python global with no lock, so concurrent {@code model.eval}
- * calls would race on the model and on GPU memory. Extracting a tile and tracing its masks - the
- * CPU-bound work - happen outside that lock, so they overlap with another tile's segmentation.
- * <p>
- * The Appose service lifecycle (build the pixi environment, activate the model-family
- * sub-environment, initialize the worker with {@code cp_utils.py}, then load the model with
- * {@code cpX_init.py} and run {@code cpX.py} per tile) is adapted, with attribution, from the
- * BSD-3-Clause imglib2-cellpose project (see NOTICE). The input-global keys supplied to the scripts
- * are those the scripts themselves read (learned by reading {@code cp3.py}/{@code cp4.py}); the
- * BufferedImage/ImageProcessor to NDArray marshalling is written independently against the raw
- * Appose NDArray API and does not reuse the ImgLib2 RAI bridge.
- * <p>
- * The service is persistent for the lifetime of this backend (one detection run): the model is
- * loaded once and reused across all tiles. It is closed by {@link #close()}.
+ * The Appose service lifecycle is adapted, with attribution, from the BSD-3-Clause imglib2-cellpose
+ * project; see NOTICE.
  */
 public class ApposeBackend implements CellposeBackend {
 
@@ -86,11 +68,7 @@ public class ApposeBackend implements CellposeBackend {
     /** Cellpose-SAM (Cellpose 4) accepts at most three channels. */
     private static final int CELLPOSE_SAM_MAX_CHANNELS = 3;
 
-    /**
-     * Live Appose services, so a single JVM shutdown hook can close them if QuPath is force-quit
-     * before {@link #close()} runs, preventing an orphaned Python subprocess. The Python-side
-     * parent-watcher (injected into the init script) is the second line of defence.
-     */
+    /** Live Appose services, closed by a JVM shutdown hook so no Python subprocess is orphaned. */
     private static final Set<Service> LIVE_SERVICES = ConcurrentHashMap.newKeySet();
     private static final AtomicBoolean SHUTDOWN_HOOK_INSTALLED = new AtomicBoolean(false);
 
@@ -100,12 +78,9 @@ public class ApposeBackend implements CellposeBackend {
     private final int requestedThreads;
 
     /**
-     * Serializes the Python side. Appose multiplexes every task over one worker process, and the
-     * vendored Cellpose scripts cache the model in a single Python global with no lock of their own,
-     * so two concurrent {@code model.eval} calls would race on that model and on GPU memory. The
-     * lock lives on the {@link Worker}, not on this backend, because the worker is shared between
-     * runs. Tile extraction and mask tracing - the CPU-bound work worth parallelizing - stay outside
-     * it.
+     * Lock serializing the Cellpose call: the vendored scripts cache the model in a single Python
+     * global, so concurrent {@code model.eval} calls would race on it. It lives on the shared
+     * {@link Worker} rather than on this backend.
      */
     private Object pythonLock() {
         return worker.lock;
@@ -117,10 +92,7 @@ public class ApposeBackend implements CellposeBackend {
     private boolean useGpu;
 
     /**
-     * Create an Appose backend.
-     *
-     * @param tileReader callback that reads detections from a tile's mask file once it exists;
-     *                   {@code Cellpose2D} supplies one that delegates to its (unchanged) mask reader
+     * @param tileReader callback turning a finished tile's masks into candidate objects
      */
     public ApposeBackend(Consumer<TileFile> tileReader) {
         this(tileReader, -1);
@@ -140,8 +112,6 @@ public class ApposeBackend implements CellposeBackend {
     @Override
     public void run(List<TileFile> tiles, CellposeSegmentationParams params) throws IOException, InterruptedException {
         if (tiles == null || tiles.isEmpty()) {
-            // Nothing to segment; the Appose backend is not used for the training/validation
-            // "run cellpose only" case.
             return;
         }
 
@@ -153,10 +123,7 @@ public class ApposeBackend implements CellposeBackend {
                 tiles.size()));
         logger.info("Segmenting {} tile(s) with {} worker(s)", tiles.size(), workers);
 
-        // Bounded pool: at most `workers` tiles hold pixels at once, so memory scales with the
-        // thread count rather than with the number of tiles. Each worker extracts its tile, waits
-        // its turn for the (serialized) Cellpose call, then traces the masks while another worker
-        // is in Python -- which is the overlap that makes this worth doing.
+        // Bounded, so at most `workers` tiles hold pixels at once.
         ExecutorService pool = Executors.newFixedThreadPool(workers,
                 ThreadTools.createThreadFactory("cellpose-appose-", true));
         List<Future<?>> futures = new ArrayList<>(tiles.size());
@@ -168,8 +135,6 @@ public class ApposeBackend implements CellposeBackend {
                 try {
                     future.get();
                 } catch (ExecutionException e) {
-                    // Stop the run on the first real failure, and don't let the remaining tiles
-                    // keep the user waiting for an outcome that is already lost.
                     futures.forEach(f -> f.cancel(true));
                     Throwable cause = e.getCause();
                     if (cause instanceof IOException)
@@ -190,11 +155,7 @@ public class ApposeBackend implements CellposeBackend {
         }
     }
 
-    /**
-     * Load the model once, before any tile is dispatched, so the workers never race to initialize
-     * it. The vendored init script reads only the model-selection globals; the model it builds is
-     * then cached in Python and reused by every subsequent task.
-     */
+    /** Load the model into the worker, unless it already holds the same one. */
     private void initializeModel(CellposeSegmentationParams params) throws IOException, InterruptedException {
         String signature = (params.isCustomModel() ? "custom:" : "named:") + params.getModel();
         synchronized (pythonLock()) {
@@ -206,7 +167,7 @@ public class ApposeBackend implements CellposeBackend {
             inputs.put("use_gpu", useGpu);
             inputs.put("custom_model", params.isCustomModel() ? params.getModel() : null);
             inputs.put("model_name", params.isCustomModel() ? null : params.getModel());
-            // Clear first: if loading fails, the worker must not claim to hold a model it does not.
+            // Clear first, so a failed load cannot leave the worker claiming a model it lacks.
             worker.loadedModel = null;
             submit(initScript, inputs, "Initializing Cellpose model");
             worker.loadedModel = signature;
@@ -215,8 +176,7 @@ public class ApposeBackend implements CellposeBackend {
 
     /** Extract one tile, segment it, and hand the labels to the tile reader. */
     private void processTile(TileFile tile, CellposeSegmentationParams params) throws IOException, InterruptedException {
-        // Cooperative cancellation: Cellpose's model.eval is a single blocking call that cannot be
-        // interrupted mid-tile, so honor QuPath's Stop between tiles.
+        // model.eval cannot be interrupted mid-tile, so cancellation is honored between tiles.
         if (Thread.currentThread().isInterrupted())
             throw new InterruptedException("Cellpose segmentation cancelled before tile "
                     + tile.getImageFile().getName());
@@ -229,8 +189,7 @@ public class ApposeBackend implements CellposeBackend {
         int width = imp.getWidth();
         int height = imp.getHeight();
 
-        // Cellpose 3 gets a compacted array holding only the channels it will use (see Cp3Layout);
-        // Cellpose 4 gets the whole stack, because cp4.py does its own slicing.
+        // Cellpose 3 gets only the channels it will use (see Cp3Layout); cp4.py slices for itself.
         Cp3Layout layout = params.isCellposeSam()
                 ? null
                 : Cp3Layout.resolve(params.getChannel1(), params.getChannel2(), imp.getStackSize());
@@ -251,7 +210,6 @@ public class ApposeBackend implements CellposeBackend {
         }
 
         if (tile.isInMemory()) {
-            // No mask file: hand the labels straight to the reader.
             tile.setLabels(labelProcessor);
         } else {
             ImagePlus maskImp = new ImagePlus(tile.getLabelFile().getName(), labelProcessor);
@@ -259,26 +217,19 @@ public class ApposeBackend implements CellposeBackend {
             maskImp.close();
         }
 
-        // Turn the masks into candidate detections. Deliberately outside the Python lock, so this
-        // runs while another worker is segmenting.
+        // Outside the Python lock, so tracing overlaps another tile's segmentation.
         tileReader.accept(tile);
     }
 
     /**
-     * A Python worker kept alive between runs, together with the lock that serializes access to it
-     * and a note of which model it currently holds loaded.
-     * <p>
-     * Starting a worker costs several seconds -- almost all of it importing torch and cellpose -- so
-     * creating one per {@code detectObjects} call made every run after the first pay for a Python
-     * interpreter it did not need. A two-stage script paid it twice; a project batch paid it once
-     * per image. The worker therefore outlives the backend and is closed at JVM shutdown, or on
-     * demand from {@code Extensions > Cellpose}, which is also how a user reclaims GPU memory.
+     * A Python worker kept alive between runs, with the lock serializing access to it and a note of
+     * which model it currently holds loaded.
      */
     private static final class Worker {
         final Service service;
         /** Serializes the Cellpose call; see {@link ApposeBackend#pythonLock}. */
         final Object lock = new Object();
-        /** Model currently loaded in this worker, so an unchanged model is not reloaded. */
+        /** Model currently loaded in this worker, or null if none. */
         String loadedModel;
 
         Worker(Service service) {
@@ -289,10 +240,7 @@ public class ApposeBackend implements CellposeBackend {
     /** Live workers, keyed by pixi sub-environment (model family + device). */
     private static final Map<String, Worker> WORKERS = new HashMap<>();
 
-    /**
-     * Shut down every cached Python worker, releasing the GPU memory they hold. Safe to call at any
-     * time; the next run simply starts a fresh worker.
-     */
+    /** Shut down every cached Python worker, releasing the GPU memory they hold. */
     public static synchronized void shutdownWorkers() {
         if (WORKERS.isEmpty()) {
             logger.info("No Cellpose Python worker is running");
@@ -333,9 +281,7 @@ public class ApposeBackend implements CellposeBackend {
     private static synchronized Worker acquireWorker(String envName, CellposeSegmentationParams params) throws IOException {
         Worker existing = WORKERS.get(envName);
         if (existing != null) {
-            // A cached worker is only useful if its process is still there. It may not be: the user
-            // can shut it down from the menu, and a Python worker can die on its own. Replace a dead
-            // one rather than handing it out and failing the run.
+            // A cached worker can be gone: shut down from the menu, or dead on its own.
             if (existing.service.isAlive()) {
                 logger.info("Reusing the running Cellpose Python worker for environment {}", envName);
                 return existing;
@@ -346,9 +292,8 @@ public class ApposeBackend implements CellposeBackend {
         }
 
         String cpUtils = ApposeEnvironments.readResource("cp_utils.py");
-        // FIX: pre-import numpy FIRST (a numpy import after the stdin reader starts deadlocks on
-        // Windows), then the parent-watcher, then cp_utils. init() replaces (not appends), so this
-        // is one combined string.
+        // numpy must be imported before the stdin reader starts, or the worker deadlocks on
+        // Windows. init() replaces rather than appends, so this is one combined string.
         String init = "import numpy\n" + parentWatcherSnippet() + cpUtils;
 
         logger.info("Starting Appose Cellpose service (device={} -> environment {}, use_gpu={})",
@@ -356,12 +301,8 @@ public class ApposeBackend implements CellposeBackend {
         try {
             Service created = ApposeEnvironments.withExtensionClassLoader(() -> {
                 Service svc = ApposeEnvironments.getEnvironment().activate(envName).python();
-                // Route Python diagnostics to the log and the user-visible console (stdout is the
-                // Appose IPC channel, so this is the only way users see tracebacks at runtime). The
-                // debug channel carries the full IPC protocol -- including the entire task script,
-                // license header and all, on every call -- which is dev-only noise. Keep the raw
-                // stream in the log at debug level, but show the console only human-readable lines
-                // (Python warnings/tracebacks and failures), not the routine request/response JSON.
+                // stdout is the Appose IPC channel, so the debug callback is the only route by
+                // which Python diagnostics reach the user.
                 svc.debug(msg -> {
                     logger.debug("[Cellpose Python] {}", msg);
                     if (isConsoleWorthy(msg))
@@ -383,13 +324,7 @@ public class ApposeBackend implements CellposeBackend {
         }
     }
 
-    /**
-     * Build the map of input globals for the Cellpose scripts. The keys are exactly those that
-     * {@code cp3.py}/{@code cp4.py} (and their {@code *_init.py}) read from {@code globals()} or
-     * reference by name. Values follow the scripts' expectations: numeric parameters, booleans, the
-     * shared-memory NDArrays for {@code input}/{@code output_labels}, and {@code null} where the
-     * scripts expect Python {@code None}.
-     */
+    /** Build the input globals read by {@code cp3.py}/{@code cp4.py}. */
     private Map<String, Object> buildInputs(CellposeSegmentationParams params, int nChannels,
                                             Cp3Layout layout, NDArray input, NDArray labels) {
         Map<String, Object> inputs = new HashMap<>();
@@ -399,9 +334,7 @@ public class ApposeBackend implements CellposeBackend {
         inputs.put("output_labels", labels);
         inputs.put("output_flows", null);
 
-        // Axes: 2D tiles, so no Z or T. Channel axis is 0 when we send a (C, Y, X) stack -- which
-        // for Cellpose 3 depends on how many channels the layout actually packed, not on how many
-        // the tile has.
+        // 2D tiles, so no Z or T. The channel axis is 0 when a (C, Y, X) stack is sent.
         inputs.put("t_axis", null);
         inputs.put("z_axis", null);
         int sentChannels = layout == null ? nChannels : layout.packedChannels();
@@ -417,8 +350,7 @@ public class ApposeBackend implements CellposeBackend {
         inputs.put("use_3D", params.isDo3D());
         inputs.put("flow_threshold", params.getFlowThreshold());
         inputs.put("cellprob_threshold", params.getCellprobThreshold());
-        // Use the resolved device, not the raw builder flag: this stays consistent with the pixi
-        // sub-environment we activated (cpu vs cuNNN).
+        // The resolved device, not the raw builder flag, so this matches the activated environment.
         inputs.put("use_gpu", useGpu);
 
         // Fixed defaults for the 2D-tile case (mirroring the script defaults).
@@ -433,20 +365,14 @@ public class ApposeBackend implements CellposeBackend {
         inputs.put("niter", null);
 
         if (params.isCellposeSam()) {
-            // Cellpose 4 (cp4.py) channel handling. cp4.py slices the channel axis DIRECTLY
-            // (input_image[..., channels, :, :]), so its chan0/chan1/chan2 are 0-based array
-            // indices -- NOT cellpose's --chan/--chan2 convention, which is what the builder's
-            // cellposeChannels(...) carries. Translate before sending; see resolveCp4Channels.
+            // cp4.py's chan0/chan1/chan2 are 0-based array indices, not --chan/--chan2 values.
             inputs.put("n_channels", nChannels);
             int[] indices = resolveCp4Channels(params.getChannel1(), params.getChannel2(), nChannels);
             inputs.put("chan0", indices.length > 0 ? Integer.valueOf(indices[0]) : null);
             inputs.put("chan1", indices.length > 1 ? Integer.valueOf(indices[1]) : null);
             inputs.put("chan2", indices.length > 2 ? Integer.valueOf(indices[2]) : null);
         } else {
-            // Cellpose 3 (cp3.py) channel handling: cp3.py passes these straight to model.eval as
-            // `channels`, which IS the --chan/--chan2 convention. Because the layout has already
-            // packed the tile down to just the channels in use, the spec refers to positions in
-            // that packed array, not in the original tile.
+            // cp3.py passes these to model.eval as `channels`, describing the packed array.
             inputs.put("cell_channel", layout.cellChannel());
             inputs.put("nuclei_channel", layout.nucleiChannel());
         }
@@ -455,23 +381,9 @@ public class ApposeBackend implements CellposeBackend {
     }
 
     /**
-     * Translate cellpose's {@code --chan}/{@code --chan2} channel numbers into the 0-based channel
-     * indices that {@code cp4.py} uses to slice the tile.
-     * <p>
-     * The two conventions differ and must not be conflated:
-     * <ul>
-     *     <li>{@code --chan}/{@code --chan2} (what {@code CellposeBuilder.cellposeChannels(a, b)}
-     *     sets) are 1-based, with {@code 0} meaning "grayscale / not specified";</li>
-     *     <li>{@code cp4.py} does {@code input_image[..., channels, :, :]}, so its values are plain
-     *     0-based indices into the exported tile's channel axis.</li>
-     * </ul>
-     * Passing the former as the latter both shifts every channel by one and puts
-     * {@code cellposeChannels(1, 2)} out of bounds on a two-channel tile.
-     * <p>
-     * When no channel is specified (the default, and what every shipped example script does), all
-     * exported channels are used -- matching the subprocess backend, which hands Cellpose-SAM the
-     * whole tile. Cellpose-SAM accepts at most three channels, so a wider tile is truncated with a
-     * warning rather than failing.
+     * Translate cellpose's {@code --chan}/{@code --chan2} numbers (1-based, {@code 0} meaning
+     * grayscale) into the 0-based channel indices {@code cp4.py} uses to slice the tile. With
+     * neither set, all exported channels are used, truncated to three with a warning.
      *
      * @param chan      the {@code --chan} value, or null if unset
      * @param chan2     the {@code --chan2} value, or null if unset
@@ -482,7 +394,6 @@ public class ApposeBackend implements CellposeBackend {
     static int[] resolveCp4Channels(Integer chan, Integer chan2, int nChannels) {
         List<Integer> requested = new ArrayList<>();
         for (Integer value : new Integer[] {chan, chan2}) {
-            // 0 means "grayscale/unspecified" in the cellpose convention, so it selects nothing here.
             if (value == null || value == 0)
                 continue;
             int index = value - 1;
@@ -493,7 +404,6 @@ public class ApposeBackend implements CellposeBackend {
         }
 
         if (requested.isEmpty()) {
-            // Nothing specified: use the whole tile, as the subprocess backend does.
             int used = Math.min(nChannels, CELLPOSE_SAM_MAX_CHANNELS);
             if (used < nChannels)
                 logger.warn("Cellpose-SAM accepts at most {} channels; using the first {} of the {} exported channels. "
@@ -512,17 +422,12 @@ public class ApposeBackend implements CellposeBackend {
     }
 
     /**
-     * How a tile's channels are packed for Cellpose 3, together with the cellpose channel spec that
-     * describes the packed array.
+     * How a tile's channels are packed for Cellpose 3, together with the cellpose channel spec
+     * describing the packed array.
      * <p>
-     * Cellpose is handed only the channels it will actually use. Sending the whole stack and letting
-     * Cellpose pick fails above three channels: it mistakes the channel axis for a Z axis -- logging
-     * {@code "z_axis not specified, assuming it is dim 0"} -- and returns an empty mask with no
-     * error, even when {@code channel_axis} is passed. Packing here also means the spec is a fixed
-     * {@code [0, 0]} or {@code [1, 2]} regardless of which channels of the tile were requested.
-     * <p>
-     * The grayscale case is averaged rather than truncated, because that is what Cellpose itself
-     * does for the {@code [0, 0]} spec, so results are unchanged for tiles it already handled.
+     * Only the channels in use are sent: given a stack of more than three channels Cellpose treats
+     * the channel axis as Z and returns an empty mask with no error, even when {@code channel_axis}
+     * is passed.
      *
      * @param bands         0-based slice indices to send, in order, or null to average all channels
      * @param cellChannel   the cellpose {@code --chan} value describing the packed array
@@ -541,7 +446,7 @@ public class ApposeBackend implements CellposeBackend {
         }
 
         /**
-         * Work out the packing for a tile from the builder's cellpose channel numbers.
+         * Work out the packing for a tile from the cellpose channel numbers.
          *
          * @param chan      the {@code --chan} value, or null if unset
          * @param chan2     the {@code --chan2} value, or null if unset
@@ -552,7 +457,6 @@ public class ApposeBackend implements CellposeBackend {
         static Cp3Layout resolve(Integer chan, Integer chan2, int nChannels) {
             List<Integer> requested = new ArrayList<>();
             for (Integer value : new Integer[] {chan, chan2}) {
-                // 0 means "grayscale/unspecified" in the cellpose convention, so it selects nothing.
                 if (value == null || value == 0)
                     continue;
                 if (value > nChannels)
@@ -562,8 +466,7 @@ public class ApposeBackend implements CellposeBackend {
             }
 
             if (requested.isEmpty()) {
-                // Grayscale over the whole tile. A single-channel tile needs no averaging, so send
-                // it untouched and keep its original pixel type.
+                // Grayscale: a single-channel tile needs no averaging, so send it untouched.
                 return nChannels == 1
                         ? new Cp3Layout(new int[] {0}, 0, null)
                         : new Cp3Layout(null, 0, null);
@@ -583,13 +486,8 @@ public class ApposeBackend implements CellposeBackend {
     }
 
     /**
-     * Submit one script to the worker, retrying the documented Appose "thread death" flake.
-     * <p>
-     * Appose occasionally reports {@code Task failed: thread death} when a worker task thread dies
-     * before it reports completion, most often on the first task after a service starts. It is
-     * transient and a plain re-submit succeeds. Our tasks are idempotent -- model init just rebuilds
-     * the model, and a segmentation task overwrites the shared-memory label buffer -- so retrying is
-     * safe. Only this specific failure is retried; a genuine Python error is surfaced immediately.
+     * Submit one script to the worker, retrying the transient Appose "thread death" failure. Both
+     * scripts are idempotent, so a re-submit is safe; any other failure is surfaced immediately.
      */
     private void submit(String script, Map<String, Object> inputs, String description) throws IOException, InterruptedException {
         IOException last = null;
@@ -641,16 +539,12 @@ public class ApposeBackend implements CellposeBackend {
                 return null;
             });
         } catch (InterruptedException e) {
-            // QuPath asked to stop while this tile was in flight: request cancellation of the task
-            // and propagate so run() halts cleanly. The service is still closed by close().
             cancelQuietly(task);
             Thread.currentThread().interrupt();
             throw e;
         } catch (TaskException e) {
             throw new IOException(description + " failed: " + e.getMessage(), e);
         } catch (Exception e) {
-            // Any other failure from the classloader-wrapped waitFor (e.g. a runtime error in the
-            // Appose plumbing): surface it as an IOException.
             throw new IOException(description + " failed: " + e.getMessage(), e);
         }
 
@@ -707,12 +601,8 @@ public class ApposeBackend implements CellposeBackend {
     }
 
     /**
-     * Decide whether a raw Appose debug line belongs in the user-facing Python console. The debug
-     * channel carries the whole IPC protocol: routine task request/response JSON that embeds the
-     * entire task script (and its BSD-3 license header) on every call. That is dev-only noise, so we
-     * drop it -- but we keep everything human-readable (Python {@code [WORKER-*]} warnings and
-     * tracebacks, pixi output, plain text) and any protocol line that reports a failure/error, so
-     * runtime problems still surface. Scripted progress arrives separately via {@link #relay}.
+     * Decide whether a raw Appose debug line belongs in the user-facing Python console: everything
+     * human-readable, but not the routine IPC request/response JSON unless it reports a failure.
      */
     private static boolean isConsoleWorthy(String msg) {
         if (msg == null || msg.isBlank())
@@ -728,11 +618,10 @@ public class ApposeBackend implements CellposeBackend {
     }
 
     /**
-     * A small Python daemon, injected into the init script, that watches the parent (QuPath) process
-     * and exits this worker if the parent dies. This prevents an orphaned python.exe if QuPath is
-     * force-quit before the JVM shutdown hook can close the service. On Windows it uses
-     * {@code OpenProcess}, NOT {@code os.kill(pid, 0)} (signal 0 on Windows crashes the target).
-     * Internal names use a leading underscore so the worker does not export them to task scripts.
+     * A Python daemon, injected into the init script, that exits the worker if QuPath dies. On
+     * Windows it must use {@code OpenProcess}, not {@code os.kill(pid, 0)}, which crashes the
+     * target. Internal names take a leading underscore so the worker does not export them to task
+     * scripts.
      */
     private static String parentWatcherSnippet() {
         return String.join("\n",
@@ -787,9 +676,8 @@ public class ApposeBackend implements CellposeBackend {
 
     @Override
     public void close() {
-        // The Python worker deliberately outlives this backend, so the next run does not pay for a
-        // fresh interpreter and model load. It is closed at JVM shutdown, or on demand through
-        // Extensions > Cellpose. Only the reference is dropped here.
+        // The worker outlives this backend; it is closed at JVM shutdown or from Extensions >
+        // Cellpose. Only the reference is dropped here.
         worker = null;
     }
 }

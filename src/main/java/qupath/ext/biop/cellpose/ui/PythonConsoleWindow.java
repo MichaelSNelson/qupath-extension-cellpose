@@ -40,25 +40,14 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * A simple, self-contained console window that surfaces the Python diagnostic output of the
- * in-process (Appose) Cellpose backend to the user.
+ * A console window that surfaces the Python diagnostic output of the in-process (Appose) Cellpose
+ * backend to the user.
  * <p>
- * This is Apache-2.0 original work for this fork, written from a behavioural specification. Appose
- * reserves the Python subprocess's stdout for its JSON IPC channel, so all Python diagnostics arrive
- * on the Java side through {@code Service.debug(...)}. Wiring that only to a logger hides tracebacks
- * from end users at exactly the moment they need them; this window makes them visible.
- * <p>
- * Design points:
- * <ul>
- *     <li>{@link #appendMessage(String)} is static and callable from any thread, even before the
- *     JavaFX {@link Stage} exists - the service starts emitting on a daemon thread before the user
- *     opens the console. Messages are enqueued on a {@link ConcurrentLinkedQueue} and drained on the
- *     FX thread by a single {@link Platform#runLater} coalesced through an {@link AtomicBoolean}, so
- *     a burst of Python logging cannot flood the FX thread.</li>
- *     <li>History accumulates from the first message (pre-window buffering) and is bounded; closing
- *     the window hides it rather than destroying it, so reopening shows the full history.</li>
- *     <li>All UI operations are guarded so a headless / scripted / test run never throws.</li>
- * </ul>
+ * {@link #appendMessage(String)} is callable from any thread and before the JavaFX {@link Stage}
+ * exists, since the Appose service starts emitting on a daemon thread. Messages are enqueued and
+ * drained on the FX thread by a single coalesced {@link Platform#runLater}; history is bounded, and
+ * closing the window hides it rather than destroying it. Every UI operation is guarded so a headless
+ * or scripted run never throws.
  */
 public final class PythonConsoleWindow {
 
@@ -110,21 +99,20 @@ public final class PythonConsoleWindow {
         stage = new Stage();
         stage.setTitle("Cellpose Python console");
         stage.setScene(new Scene(root, 800, 480));
-        // Hide on close, do not destroy: history and buffering survive so reopening shows everything.
+        // Hide rather than destroy, so reopening shows the full history.
         stage.setOnCloseRequest(e -> {
             e.consume();
             stage.hide();
         });
 
-        // Seed the text area with whatever history has accumulated before the window existed.
+        // Seed with whatever history accumulated before the window existed.
         if (!HISTORY.isEmpty())
             textArea.setText(String.join("\n", HISTORY) + "\n");
     }
 
     /**
-     * Append one message to the console. Safe to call from any thread and before the window exists.
-     * The message is buffered and drained onto the JavaFX thread; if JavaFX is unavailable (headless
-     * or test runs) the message is retained in the buffer and simply never rendered.
+     * Append one message to the console. Safe to call from any thread and before the window exists;
+     * with no JavaFX available the message stays in the buffer and is never rendered.
      *
      * @param message the line to append; {@code null} is ignored
      */
@@ -132,7 +120,7 @@ public final class PythonConsoleWindow {
         if (message == null)
             return;
         PENDING.add(message);
-        // Bound the inbox so a never-draining queue (e.g. headless) cannot grow without limit.
+        // Bound the inbox, which never drains when headless.
         while (PENDING.size() > MAX_LINES)
             PENDING.poll();
         scheduleFlush();
@@ -160,7 +148,6 @@ public final class PythonConsoleWindow {
             HISTORY.addLast(line);
             appended.append(line).append('\n');
         }
-        // When history overflows, trim in one shot back to TRIM_TO to avoid churn on a large burst.
         boolean trimmed = false;
         if (HISTORY.size() > MAX_LINES) {
             while (HISTORY.size() > TRIM_TO)
@@ -171,7 +158,6 @@ public final class PythonConsoleWindow {
         if (window == null || appended.length() == 0)
             return;
         if (trimmed) {
-            // History window shifted; rebuild the text area from the retained history.
             window.textArea.setText(String.join("\n", HISTORY) + "\n");
         } else {
             window.textArea.appendText(appended.toString());
@@ -202,7 +188,7 @@ public final class PythonConsoleWindow {
             window = new PythonConsoleWindow();
             instance = window;
         }
-        // Draining any buffered messages into the freshly created text area.
+        // Drain any buffered messages into the freshly created text area.
         flush();
         window.stage.show();
         window.stage.toFront();

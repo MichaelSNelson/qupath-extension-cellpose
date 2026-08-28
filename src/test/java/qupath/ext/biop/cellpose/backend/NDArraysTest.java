@@ -37,9 +37,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
- * Round-trip tests for {@link NDArrays}: ImageJ processors to Appose {@link NDArray} and back,
- * for 8/16/32-bit data and for single- and multi-channel images. These do not require a live Python
- * environment.
+ * Round-trip tests for {@link NDArrays}: ImageJ processors to Appose {@link NDArray} and back, for
+ * 8/16/32-bit data and for single- and multi-channel images.
  */
 class NDArraysTest {
 
@@ -156,7 +155,6 @@ class NDArraysTest {
     void labelsRoundTripThroughShortProcessor() throws Exception {
         NDArray labels = NDArrays.allocateLabels(WIDTH, HEIGHT);
         try {
-            // 32-bit, so a tile that somehow exceeded 65535 objects is reported rather than wrapped.
             assertEquals(DType.UINT32, labels.dType());
             ByteBuffer buffer = labels.buffer().order(ByteOrder.nativeOrder());
             buffer.rewind();
@@ -174,9 +172,8 @@ class NDArraysTest {
 
     @Test
     void tooManyLabelsIsReportedRatherThanTruncated() {
-        // Cellpose writes its result with `output_labels[:] = masks`, a numpy slice assignment that
-        // casts SILENTLY. Into a 16-bit buffer, object 65536 would become background and 65537 would
-        // merge into object 1 -- a plausible-looking, wrong segmentation with no error anywhere.
+        // Cellpose writes its result with `output_labels[:] = masks`, which casts silently, so a
+        // narrower buffer would wrap high labels into other objects with no error.
         NDArray labels = NDArrays.allocateLabels(WIDTH, HEIGHT);
         try {
             ByteBuffer buffer = labels.buffer().order(ByteOrder.nativeOrder());
@@ -199,10 +196,9 @@ class NDArraysTest {
     void shmIsUsableThenClosedCleanly() {
         NDArray nd = NDArrays.allocateLabels(WIDTH, HEIGHT);
         assertNotNull(nd.shm(), "shared memory should be allocated");
-        // Closing must release the shared memory without error, and must be idempotent.
+        // Closing must be idempotent.
         assertDoesNotThrow(nd::close);
         assertDoesNotThrow(nd::close);
-        // A fresh allocation must still succeed after a previous one was closed.
         try (NDArray again = NDArrays.allocateLabels(WIDTH, HEIGHT)) {
             assertNotNull(again.shm());
         }

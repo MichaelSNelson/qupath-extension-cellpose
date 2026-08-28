@@ -42,8 +42,6 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
     private static final Logger logger = LoggerFactory.getLogger(CellposeExtension.class);
     private boolean isInstalled = false;
 
-    // Persistent preference selecting how Cellpose is run for detection: the default external
-    // SUBPROCESS transport, or the opt-in in-process APPOSE transport.
     private static final ObjectProperty<CellposeTransport> cellposeTransport =
             PathPrefs.createPersistentPreference("cellposeTransport", CellposeTransport.SUBPROCESS, CellposeTransport.class);
 
@@ -55,13 +53,9 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
         return cellposeTransport.get();
     }
 
-    // Persistent preference selecting the compute device for the in-process (Appose) transport:
-    // AUTO detects a GPU, GPU forces the CUDA environment, CPU forces the CPU environment.
     /**
-     * Directory that will CONTAIN the in-process backend's Python environment, or empty for the
-     * Appose default ({@code ~/.local/share/appose}). Configurable because the environment is
-     * several GB: on a shared workstation every user otherwise gets their own copy on the system
-     * drive, and some sites keep large caches off C: entirely.
+     * Directory containing the in-process backend's Python environment, or empty for the Appose
+     * default ({@code ~/.local/share/appose}).
      */
     private static final StringProperty cellposeApposeEnvDir =
             PathPrefs.createPersistentPreference("cellposeApposeEnvDir", "");
@@ -76,8 +70,7 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
     }
 
     /**
-     * Record where the Appose environment should live. Used by the first-run prompt so the choice
-     * persists, rather than being asked again on the next build.
+     * Record where the Appose environment should live.
      *
      * @param dir the containing directory, or empty/null for the Appose default
      */
@@ -206,12 +199,8 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
         // Add Permanent Preferences and Populate Preferences
         QuPathGUI.getInstance().getPreferencePane().getPropertySheet().getItems().addAll(cellposePathItem, cellposeSAMPathItem, omniposePathItem, condaPathItem, transportItem, deviceItem, apposeEnvDirItem);
 
-        // Add a menu item to open the Python console, which surfaces the in-process backend's
-        // Python diagnostics (the Appose IPC channel reserves stdout, so this is the only runtime view).
-        // The in-process backend keeps its Python worker alive between runs so each run does not pay
-        // to start an interpreter and reload the model. "Shut down Python worker" ends it, which is
-        // how a user reclaims the GPU memory it holds without restarting QuPath; the next run simply
-        // starts a fresh one.
+        // The in-process backend keeps its Python worker alive between runs; shutting it down is
+        // how a user reclaims the GPU memory it holds without restarting QuPath.
         MenuTools.addMenuItems(
                 qupath.getMenu("Extensions>Cellpose", true),
                 new Action("Python console", e -> PythonConsoleWindow.show()),

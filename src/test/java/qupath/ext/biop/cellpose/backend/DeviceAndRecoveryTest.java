@@ -25,8 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unit tests for the device-resolution logic and the Windows recovery / lock-format matchers. These
- * are pure and do not touch Python or the network.
+ * Unit tests for the device-resolution logic and the Windows recovery / lock-format matchers.
  */
 class DeviceAndRecoveryTest {
 
@@ -57,7 +56,6 @@ class DeviceAndRecoveryTest {
 
     @Test
     void windowsFileLockDetectedThroughFullCauseChain() {
-        // The top-level pixi message is generic; the os-error-32 text is only in a nested cause.
         Throwable nested = new IllegalStateException(
                 "failed to link cellpose.conda ... The process cannot access the file because it is "
                         + "being used by another process. (os error 32)");
@@ -78,10 +76,9 @@ class DeviceAndRecoveryTest {
 
     @Test
     void collectCauseMessagesToleratesSelfReference() {
-        // A cause cycle must not loop forever.
+        // Java forbids a true cause cycle, so this only exercises a nested chain.
         Throwable a = new RuntimeException("a");
         Throwable b = new RuntimeException("b", a);
-        // Not truly cyclic (Java forbids it), but exercise a deep chain safely.
         String chain = ApposeEnvironments.collectCauseMessages(b);
         assertTrue(chain.contains("a") && chain.contains("b"));
     }

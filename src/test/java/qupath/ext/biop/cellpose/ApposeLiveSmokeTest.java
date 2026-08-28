@@ -35,16 +35,10 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Live end-to-end smoke test for the in-process {@link ApposeBackend}. This is deliberately gated
- * behind the {@code CELLPOSE_LIVE=true} environment variable because it builds a multi-GB
- * pixi/PyTorch/Cellpose environment on first run and downloads model weights; it is NOT part of the
- * normal unit-test run.
- * <p>
- * It drives the real shipping path ({@code ApposeBackend.run}) on a deliberately NON-SQUARE synthetic
- * image so that any height/width transpose in the NDArray marshalling surfaces as a Cellpose
- * broadcast failure rather than passing silently. Cellpose 3 ({@code cyto3}) is used on a grayscale
- * image with a few bright disks; the test asserts the round-trip completes, the {@code _cp_masks.tif}
- * is written with the input dimensions, and at least one label was produced.
+ * Live end-to-end smoke test for the in-process {@link ApposeBackend}, gated behind the
+ * {@code CELLPOSE_LIVE=true} environment variable because it builds a multi-GB pixi environment and
+ * downloads model weights. It runs Cellpose 3 on a synthetic grayscale image of bright disks and
+ * asserts that the mask file is written with the input dimensions and holds at least one label.
  *
  * Run with:
  *   CELLPOSE_LIVE=true ./gradlew test --tests qupath.ext.biop.cellpose.ApposeLiveSmokeTest
@@ -63,8 +57,7 @@ public class ApposeLiveSmokeTest {
         File tileImage = new File(dir, "Temp_0_0_z0_t0.tif");
         writeSyntheticCells(tileImage);
 
-        // getLabelFile() is derived from the image path (<base>_cp_masks.tif); RegionRequest and
-        // parent are unused by ApposeBackend.run, so null is fine for this smoke.
+        // RegionRequest and parent are unused by ApposeBackend.run.
         TileFile tile = new TileFile(null, tileImage, null);
 
         CellposeSegmentationParams params = CellposeSegmentationParams.builder()

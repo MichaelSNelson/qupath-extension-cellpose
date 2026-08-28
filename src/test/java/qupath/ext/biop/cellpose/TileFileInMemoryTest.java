@@ -26,10 +26,8 @@ import java.io.File;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * The in-process backend never writes a tile or a mask, so it depends on {@link TileFile} being able
- * to carry both in memory. These tests pin that contract, and the fact that a tile built for the
- * subprocess backend still behaves exactly as before -- if that regressed, the default path would
- * silently stop producing the files Cellpose is pointed at.
+ * Tests that {@link TileFile} can carry both the tile image and its labels in memory for the
+ * in-process backend, while a file-backed tile still reports itself as such.
  */
 public class TileFileInMemoryTest {
 
@@ -69,7 +67,6 @@ public class TileFileInMemoryTest {
         tile.setLabels(labels);
         Assertions.assertSame(labels, tile.getLabels());
 
-        // Tracing consumes the labels; holding them afterwards would retain every tile's masks.
         tile.clearLabels();
         Assertions.assertNull(tile.getLabels());
     }

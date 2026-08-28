@@ -22,11 +22,6 @@ import qupath.lib.roi.GeometryTools;
 
 /**
  * Holds a single candidate detection geometry, used to quickly check overlaps between detections.
- * <p>
- * This used to be a private static inner class of {@link Cellpose2D}; it was promoted to a
- * package-visible top-level type so that {@link TileFile} can reference it while remaining a
- * standalone class shared with the backend package. The logic is unchanged from the original
- * inner class.
  */
 class CandidateObject {
     final double area;

@@ -37,16 +37,10 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * LIVE diagnostic (not part of the normal unit-test run) that drives the real
- * {@link ApposeBackend} across the channel configurations produced by the SHIPPED example
- * scripts, which the single-channel smoke test never reaches:
- * <ul>
- *     <li>{@code Detect_nuclei_and_cells_using_Cellpose.groovy} exports two channels
- *     ({@code .channels("HCS","DAPI")}) and never calls {@code cellposeChannels(...)};</li>
- *     <li>{@code Cellpose_detection_template.groovy} documents {@code .cellposeChannels(1,2)},
- *     whose values are cellpose's 1-based {@code --chan}/{@code --chan2}.</li>
- * </ul>
- * Every case is run independently and its outcome reported, so one failure does not hide the rest.
+ * Live diagnostic that drives the real {@link ApposeBackend} across the channel configurations the
+ * shipped example scripts produce: two exported channels with {@code cellposeChannels(...)} unset,
+ * and the {@code cellposeChannels(1, 2)} form the detection template documents. Every case runs
+ * independently and reports its own outcome, so one failure does not hide the rest.
  *
  * Run with:
  *   CELLPOSE_LIVE=true ./gradlew test --tests qupath.ext.biop.cellpose.ApposeChannelMatrixLiveTest
@@ -73,8 +67,7 @@ public class ApposeChannelMatrixLiveTest {
                 new Case("CP3 2ch  cellposeChannels(2,1)", 2, 2, 1, false),
                 new Case("CP3 3ch  defaults          ", 3, 0, null, false),
                 new Case("CP3 7ch  defaults          ", 7, 0, null, false),
-                // Cellpose2D hands the backend every tile of the region in one run(); the service
-                // is built once and reused, so a per-tile leak or a stale export only shows here.
+                // Several tiles in one run(), which is how Cellpose2D calls the backend.
                 new Case("CP3 2ch  3 tiles, one run  ", 2, 0, null, false, 3)
         );
 
@@ -164,13 +157,9 @@ public class ApposeChannelMatrixLiveTest {
 
     /**
      * 32-bit float multi-channel tile, mimicking what {@code Cellpose2D.saveTileImage} produces
-     * after the op chain (which converts to float32). Channel 0 carries bright disks, channel 1
-     * smaller disks (nuclei-like), and any further channels a faint copy of channel 0.
-     * <p>
-     * The faint copy matters: with no {@code cellposeChannels(...)} the cellpose channel spec is
-     * {@code [0, 0]} (grayscale), which averages the channel axis. Flat filler channels would dilute
-     * the signal below threshold and the case would report zero labels -- a property of cellpose's
-     * grayscale handling, not of this backend, which is not what this diagnostic is measuring.
+     * after the op chain. Channel 0 carries bright disks, channel 1 smaller nuclei-like disks, and
+     * any further channels a faint copy of channel 0 -- flat filler channels would dilute the
+     * grayscale average below threshold and the case would report zero labels for that reason alone.
      */
     private static void writeSyntheticTile(File file, int nChannels) {
         ImageStack stack = new ImageStack(WIDTH, HEIGHT);

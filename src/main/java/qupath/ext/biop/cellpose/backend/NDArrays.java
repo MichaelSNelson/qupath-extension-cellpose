@@ -32,20 +32,18 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
- * Marshalling between ImageJ image data and Appose {@link NDArray} shared-memory buffers.
- * <p>
- * This is Apache-2.0 original work, written independently against the public Appose
- * {@link NDArray} API. It does not reuse any ImgLib2/imglib2-appose helper. The conventions are:
+ * Marshalling between ImageJ image data and Appose {@link NDArray} shared-memory buffers. The
+ * conventions are:
  * <ul>
  *     <li>the DType is chosen from the ImageJ processor bit depth: 8-bit -&gt; UINT8,
  *     16-bit -&gt; UINT16, 32-bit float -&gt; FLOAT32;</li>
  *     <li>arrays are laid out in C order (row-major) with the shape (height, width) for a single
  *     plane, or (channels, height, width) for a multi-channel image;</li>
- *     <li>pixels are copied through {@link NDArray#buffer()} honouring the native byte order, which
- *     is what the numpy view on the Python side expects.</li>
+ *     <li>pixels are copied through {@link NDArray#buffer()} in the native byte order, which is what
+ *     the numpy view on the Python side expects.</li>
  * </ul>
  * Every {@link NDArray} allocated here owns a shared-memory segment and must be
- * {@link NDArray#close() closed} by the caller once done, to avoid leaking shared memory.
+ * {@link NDArray#close() closed} by the caller.
  */
 final class NDArrays {
 
@@ -103,9 +101,6 @@ final class NDArrays {
     /**
      * Convert selected slices of an {@link ImagePlus} to an input {@link NDArray}, packed compactly:
      * shape (height, width) for a single band, or (bands, height, width) otherwise, in C order.
-     * <p>
-     * Packing the chosen channels compactly -- rather than sending the whole stack and asking
-     * Cellpose to index into it -- keeps the array within the channel count Cellpose can interpret.
      *
      * @param imp   the image
      * @param bands 0-based slice indices to include, in the order Cellpose should see them
@@ -132,13 +127,7 @@ final class NDArrays {
 
     /**
      * Average every slice of an {@link ImagePlus} into a single FLOAT32 plane of shape
-     * (height, width) in C order.
-     * <p>
-     * This reproduces, on the Java side, what Cellpose does for the grayscale channel spec
-     * {@code [0, 0]} (it averages the channel axis). Doing it here means Cellpose is handed a plain
-     * 2D plane: above three channels it otherwise mistakes the channel axis for a Z axis -- logging
-     * {@code "z_axis not specified, assuming it is dim 0"} and returning an empty mask -- even when
-     * {@code channel_axis} is passed explicitly. FLOAT32 keeps the mean exact for integer inputs.
+     * (height, width) in C order, as Cellpose does for the grayscale channel spec {@code [0, 0]}.
      *
      * @param imp the image
      * @return a freshly allocated NDArray; the caller must close it
@@ -186,12 +175,9 @@ final class NDArrays {
     /**
      * Allocate a 2D label {@link NDArray} of shape (height, width) in C order.
      * <p>
-     * UINT32, deliberately, even though a tile is never expected to hold more than 65535 objects.
-     * The Cellpose scripts write the result with {@code output_labels[:] = masks}, and a numpy slice
-     * assignment casts SILENTLY: into a UINT16 buffer, object 65536 becomes background and 65537
-     * merges into object 1, producing a plausible-looking but wrong segmentation with no error
-     * anywhere. A 32-bit buffer cannot wrap, so the impossible case is reported by
-     * {@link #labelsToShortProcessor} instead of corrupting the result.
+     * UINT32, because the Cellpose scripts write the result with {@code output_labels[:] = masks},
+     * which casts silently: a narrower buffer would wrap high label values into other objects with
+     * no error. {@link #labelsToShortProcessor} reports the overflow instead.
      *
      * @param width  the label image width
      * @param height the label image height
@@ -203,11 +189,8 @@ final class NDArrays {
     }
 
     /**
-     * Read a 2D UINT32 label {@link NDArray} back into an ImageJ {@link ShortProcessor}.
-     * <p>
-     * Downstream tracing works on 16-bit labels, which is ample for any realistic tile. If Cellpose
-     * ever returns more objects than that, this fails with an actionable message rather than
-     * quietly truncating them.
+     * Read a 2D UINT32 label {@link NDArray} back into an ImageJ {@link ShortProcessor}, which is
+     * what downstream tracing works on.
      *
      * @param labels a UINT32 NDArray with shape (height, width) in C order
      * @param width  the expected width
@@ -227,8 +210,6 @@ final class NDArrays {
             pixels[i] = (short) value;
         }
         if (max > MAX_LABELS_PER_TILE) {
-            // Refuse rather than truncate: the caller would otherwise receive a mask in which the
-            // objects past 65535 have silently become background or merged into low-numbered ones.
             throw new IOException(String.format(
                     "Cellpose returned %d objects for a single %dx%d tile, but at most %d can be represented. "
                             + "Reduce the tile size (CellposeBuilder.tileSize) so each tile holds fewer objects.",
@@ -239,8 +220,7 @@ final class NDArrays {
 
     /**
      * Read a 2D {@link NDArray} back into an ImageJ {@link ImageProcessor} of the matching type.
-     * Supports UINT8, UINT16 and FLOAT32 with shape (height, width) in C order. Intended primarily
-     * for round-trip verification.
+     * Supports UINT8, UINT16 and FLOAT32 with shape (height, width) in C order.
      *
      * @param ndArray the NDArray to convert
      * @return a new ImageProcessor of the matching type

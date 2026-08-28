@@ -108,9 +108,9 @@ public class CellposeBuilder {
     private boolean cleanTrainingDir = false;
     private boolean useCellposeSAM = false;
     private String outputModelName;
-    // Detection transport. Null means "use the extension-wide preference" (which defaults to the subprocess transport).
+    // Null means "use the extension-wide preference".
     private CellposeTransport transport = null;
-    // Compute device for the in-process (Appose) transport. Null means "use the extension-wide preference" (defaults to AUTO).
+    // Null means "use the extension-wide preference".
     private CellposeDevice device = null;
 
     /**
@@ -685,8 +685,7 @@ public class CellposeBuilder {
     }
 
     /**
-     * Convenience for {@code transport(CellposeTransport.APPOSE)}: run Cellpose in-process through
-     * Appose instead of launching an external Python process. Overrides the extension-wide preference.
+     * Convenience for {@code transport(CellposeTransport.APPOSE)}.
      *
      * @return this builder
      */
@@ -695,10 +694,9 @@ public class CellposeBuilder {
     }
 
     /**
-     * Select the compute device for the in-process ({@link CellposeTransport#APPOSE}) transport:
-     * {@link CellposeDevice#AUTO} (detect a GPU), {@link CellposeDevice#GPU} (force the CUDA
-     * environment), or {@link CellposeDevice#CPU} (force the CPU environment). When set, this
-     * overrides the extension-wide device preference. Ignored by the subprocess transport.
+     * Select the compute device for the in-process ({@link CellposeTransport#APPOSE}) transport.
+     * When set, this overrides the extension-wide device preference; the subprocess transport
+     * ignores it.
      *
      * @param device the device to use
      * @return this builder

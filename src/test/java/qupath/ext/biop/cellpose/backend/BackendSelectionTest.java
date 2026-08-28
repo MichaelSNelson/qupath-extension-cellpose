@@ -28,10 +28,8 @@ class BackendSelectionTest {
 
     @Test
     void builderFlagOverridesPreference() {
-        // Builder explicitly asks for APPOSE while the preference is SUBPROCESS -> APPOSE wins.
         assertEquals(CellposeTransport.APPOSE,
                 CellposeBackend.resolveTransport(CellposeTransport.APPOSE, CellposeTransport.SUBPROCESS));
-        // Builder explicitly asks for SUBPROCESS while the preference is APPOSE -> SUBPROCESS wins.
         assertEquals(CellposeTransport.SUBPROCESS,
                 CellposeBackend.resolveTransport(CellposeTransport.SUBPROCESS, CellposeTransport.APPOSE));
     }
