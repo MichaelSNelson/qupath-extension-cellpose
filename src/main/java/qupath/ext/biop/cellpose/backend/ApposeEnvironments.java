@@ -64,6 +64,13 @@ final class ApposeEnvironments {
 
     private static final Object LOCK = new Object();
     private static volatile Environment environment;
+
+    /**
+     * Directory {@link #environment} was built in, or null if nothing is built. Compared against the
+     * current preference so a changed location is noticed without a restart.
+     */
+    private static volatile Path builtAt;
+
     private static volatile boolean firstRunWarned = false;
 
     private ApposeEnvironments() {}
@@ -76,9 +83,17 @@ final class ApposeEnvironments {
      */
     static Environment getEnvironment() throws IOException {
         Environment local = environment;
-        if (local != null)
+        if (local != null && getEnvironmentPath().equals(builtAt))
             return local;
         synchronized (LOCK) {
+            if (environment != null && !getEnvironmentPath().equals(builtAt)) {
+                logger.info("The Cellpose Appose environment directory changed from {} to {}; "
+                        + "rebuilding at the new location", builtAt, getEnvironmentPath());
+                environment = null;
+                builtAt = null;
+                // The new location gets its own multi-GB download, so the warning applies again.
+                firstRunWarned = false;
+            }
             if (environment == null) {
                 String pixiToml = readResource("pixi.toml");
                 String pixiLock = readResource("pixi.lock");
@@ -97,9 +112,32 @@ final class ApposeEnvironments {
                     warnFirstRun();
 
                 environment = buildEnvironment(pixiToml, envDir, firstBuild);
+                builtAt = envDir;
             }
             return environment;
         }
+    }
+
+    /**
+     * Whether a built environment exists somewhere other than the currently configured location.
+     *
+     * <p>Called from {@code ApposeBackend} while it holds its own monitor, so it takes no lock here:
+     * {@link #getEnvironment()} makes the same comparison authoritatively before rebuilding.
+     *
+     * @return true if the environment directory preference has moved since the environment was built
+     */
+    static boolean environmentDirectoryChanged() {
+        return environment != null && directoryMovedFrom(builtAt);
+    }
+
+    /**
+     * Whether the configured environment directory now resolves somewhere other than {@code built}.
+     *
+     * @param built the directory an environment was built in, or null if none has been
+     * @return true if the two differ
+     */
+    static boolean directoryMovedFrom(Path built) {
+        return built != null && !getEnvironmentPath().equals(built);
     }
 
     /**
@@ -326,7 +364,7 @@ final class ApposeEnvironments {
     }
 
     /** @return the directory Appose installs the Cellpose environment into. */
-    private static Path getEnvironmentPath() {
+    static Path getEnvironmentPath() {
         return getEnvironmentBase().resolve(ENV_DIR_NAME);
     }
 

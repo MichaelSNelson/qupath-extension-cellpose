@@ -184,8 +184,8 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
                         + "Leave empty for the default location (~/.local/share/appose).\n"
                         + "The environment is several GB, so on a shared workstation it is worth putting it "
                         + "somewhere other than the system drive.\n"
-                        + "Takes effect after QuPath is restarted: an environment already built in this "
-                        + "session stays in use until then.\n"
+                        + "Takes effect on the next detection: any running Python worker is stopped "
+                        + "and the environment is built at the new location.\n"
                         + "A new location means a new environment. The old one is left where it is, so "
                         + "delete it yourself to reclaim the space.\n"
                         + "Avoid paths containing spaces -- pixi cannot build in them.")

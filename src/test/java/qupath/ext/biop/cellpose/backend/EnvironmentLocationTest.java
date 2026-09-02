@@ -55,6 +55,35 @@ public class EnvironmentLocationTest {
     }
 
     @Test
+    void nothingBuiltYetIsNotAMove() {
+        CellposeExtension.setApposeEnvDirPreference("/data/shared/appose");
+        Assertions.assertFalse(ApposeEnvironments.directoryMovedFrom(null));
+    }
+
+    @Test
+    void theSameDirectoryIsNotAMove() {
+        CellposeExtension.setApposeEnvDirPreference("/data/shared/appose");
+        Assertions.assertFalse(ApposeEnvironments.directoryMovedFrom(ApposeEnvironments.getEnvironmentPath()));
+    }
+
+    @Test
+    void spellingTheDefaultOutExplicitlyIsNotAMove() {
+        CellposeExtension.setApposeEnvDirPreference("");
+        Path built = ApposeEnvironments.getEnvironmentPath();
+        CellposeExtension.setApposeEnvDirPreference(
+                Paths.get(System.getProperty("user.home"), ".local", "share", "appose").toString());
+        Assertions.assertFalse(ApposeEnvironments.directoryMovedFrom(built));
+    }
+
+    @Test
+    void aNewDirectoryIsAMove() {
+        CellposeExtension.setApposeEnvDirPreference("/data/shared/appose");
+        Path built = ApposeEnvironments.getEnvironmentPath();
+        CellposeExtension.setApposeEnvDirPreference("/scratch/appose");
+        Assertions.assertTrue(ApposeEnvironments.directoryMovedFrom(built));
+    }
+
+    @Test
     void blankIsTreatedAsUnset() {
         CellposeExtension.setApposeEnvDirPreference("   ");
         Path expected = Paths.get(System.getProperty("user.home"), ".local", "share", "appose");

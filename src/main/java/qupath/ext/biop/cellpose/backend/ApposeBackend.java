@@ -283,6 +283,15 @@ public class ApposeBackend implements CellposeBackend {
 
     /** Reuse the worker for this environment if one is already running, otherwise start one. */
     private static synchronized Worker acquireWorker(String envName, CellposeSegmentationParams params) throws IOException {
+        // A worker holds a Python process rooted in the environment it was started from, so a moved
+        // environment directory means every cached worker is pointing at the old one. Reentrant on
+        // this monitor; done here rather than in ApposeEnvironments because the lock order is
+        // ApposeBackend -> ApposeEnvironments and must not be taken the other way round.
+        if (ApposeEnvironments.environmentDirectoryChanged()) {
+            logger.info("The Cellpose Appose environment directory changed; stopping the running worker(s)");
+            shutdownWorkers();
+        }
+
         Worker existing = WORKERS.get(envName);
         if (existing != null) {
             // A cached worker can be gone: shut down from the menu, or dead on its own.
