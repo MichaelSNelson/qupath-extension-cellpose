@@ -246,8 +246,12 @@ front rather than after the download.
 
 This matters on a shared workstation: the environment is several GB, and without it every user
 ends up with their own copy on the system drive. Note that pixi cannot build in a path containing
-spaces. Changing the setting after the environment exists leaves the old one in place -- delete it
-yourself to reclaim the space.
+spaces.
+
+Changing the setting takes effect on the next detection: any running Python worker is stopped and
+the environment is built at the new location. The comparison is on the resolved path, so spelling
+the default location out by hand is not treated as a move. The old environment is left where it is
+-- delete it yourself to reclaim the space.
 
 ### Python environment
 
@@ -275,9 +279,16 @@ change to `pixi.toml` and commit the lock it produces.
   a multi-tile run) for Cellpose 3 and Cellpose-SAM against real Cellpose. Run it with
   `CELLPOSE_LIVE=true ./gradlew test --tests '*ApposeChannelMatrixLiveTest'`
   (add `CELLPOSE_LIVE_SAM=true` for the Cellpose-SAM cases, which build a second environment).
-- **Windows and macOS: not verified.** The Windows-specific handling (numpy pre-import, GPU
-  detection, conda-link file-lock recovery) is present and written against documented behaviour,
-  but it has not been exercised on either platform for the current code.
+- **Detection, Windows + CUDA:** verified end-to-end inside QuPath on the current code -- the
+  two-stage nuclei-and-cell example script, combining 1329 cytoplasms and 1355 nuclei, with the
+  Python worker and the loaded model reused across both stages and no temporary files written. The
+  first-run prompt appeared and the environment built at a chosen location on a non-system drive,
+  which also exercises the Windows-specific handling (numpy pre-import, GPU detection, conda-link
+  file-lock recovery).
+- **macOS: not verified.** Nobody has yet built the environment or run a detection on a Mac. There
+  is no CUDA there, so the device resolves to CPU and the `osx-arm64` entries in the committed lock
+  are used; neither path has been exercised. Intel Macs (`osx-64`) are declared in the manifest but
+  deprecated upstream.
 - **Training / validation / QC: not verified.** These paths are unchanged by design and provably do
   not go through the Appose backend (see above), but they have not been re-run against a real
   training environment as part of this work.
