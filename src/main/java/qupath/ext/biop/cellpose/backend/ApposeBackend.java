@@ -115,6 +115,11 @@ public class ApposeBackend implements CellposeBackend {
             return;
         }
 
+        // Produce one tile before the environment build and the model load. Tiles are lazy on this
+        // path, so without this a bad channel name surfaces only after several minutes of setup,
+        // where the subprocess backend rejects it immediately.
+        probeFirstTile(tiles.get(0));
+
         ensureService(params);
         initializeModel(params);
 
@@ -175,6 +180,22 @@ public class ApposeBackend implements CellposeBackend {
     }
 
     /** Extract one tile, segment it, and hand the labels to the tile reader. */
+    /**
+     * Check that a tile image can actually be produced, reporting failure through the same channel
+     * the segmentation loop uses.
+     *
+     * @param tile the tile to materialise and discard
+     * @throws IOException if the tile image cannot be produced
+     */
+    private static void probeFirstTile(TileFile tile) throws IOException {
+        try {
+            if (tile.openImage() == null)
+                throw new IOException("Could not produce the tile image for " + tile.getImageFile().getName());
+        } catch (RuntimeException e) {
+            throw new IOException("Could not produce tile images: " + e.getMessage(), e);
+        }
+    }
+
     private void processTile(TileFile tile, CellposeSegmentationParams params) throws IOException, InterruptedException {
         // model.eval cannot be interrupted mid-tile, so cancellation is honored between tiles.
         if (Thread.currentThread().isInterrupted())
