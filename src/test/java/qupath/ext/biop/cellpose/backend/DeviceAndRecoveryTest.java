@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -40,18 +41,57 @@ class DeviceAndRecoveryTest {
     }
 
     @Test
-    void resolveUseGpuForcedDevices() {
-        // GPU and CPU are deterministic; AUTO depends on the host and is not asserted here.
-        assertTrue(ApposeEnvironments.resolveUseGpu(CellposeDevice.GPU));
-        assertFalse(ApposeEnvironments.resolveUseGpu(CellposeDevice.CPU));
+    void cpuIsAlwaysHonoured() {
+        // GPU and AUTO depend on the host and are not asserted here.
+        assertNull(ApposeEnvironments.cudaVariant(CellposeDevice.CPU));
     }
 
     @Test
-    void envNameCombinesFamilyAndDevice() {
-        assertEquals("cp3-cpu", ApposeEnvironments.envName(false, false));
-        assertEquals("cp3-cu126", ApposeEnvironments.envName(false, true));
-        assertEquals("cp4-cpu", ApposeEnvironments.envName(true, false));
-        assertEquals("cp4-cu126", ApposeEnvironments.envName(true, true));
+    void envNameCombinesFamilyAndCudaBuild() {
+        assertEquals("cp3-cpu", ApposeEnvironments.envName(false, null));
+        assertEquals("cp3-cu126", ApposeEnvironments.envName(false, "cu126"));
+        assertEquals("cp4-cpu", ApposeEnvironments.envName(true, null));
+        assertEquals("cp4-cu130", ApposeEnvironments.envName(true, "cu130"));
+    }
+
+    @Test
+    void oldCardsTakeTheOnlyBuildThatHasThem() {
+        // cu130 starts at sm_75, so Maxwell, Pascal and Volta have nowhere else to go.
+        assertEquals("cu126", ApposeEnvironments.cudaBuildFor("5.0"));
+        assertEquals("cu126", ApposeEnvironments.cudaBuildFor("6.1"));
+        assertEquals("cu126", ApposeEnvironments.cudaBuildFor("7.0"));
+    }
+
+    @Test
+    void sharedRangePrefersTheOlderBuild() {
+        // Both builds cover sm_75..sm_90; staying on cu126 avoids a second multi-GB download
+        // for machines that already have it.
+        assertEquals("cu126", ApposeEnvironments.cudaBuildFor("7.5"));
+        assertEquals("cu126", ApposeEnvironments.cudaBuildFor("8.6"));
+        assertEquals("cu126", ApposeEnvironments.cudaBuildFor("9.0"));
+    }
+
+    @Test
+    void newCardsTakeTheBuildThatHasThem() {
+        // cu126 stops at sm_90 and ships no PTX, so Blackwell cannot run it at all.
+        assertEquals("cu130", ApposeEnvironments.cudaBuildFor("10.0"));
+        assertEquals("cu130", ApposeEnvironments.cudaBuildFor("12.0"));
+        // cu130 carries compute_120 PTX, so anything newer can still JIT.
+        assertEquals("cu130", ApposeEnvironments.cudaBuildFor("13.0"));
+    }
+
+    @Test
+    void cardsBelowEveryBuildGetNoCuda() {
+        assertNull(ApposeEnvironments.cudaBuildFor("3.7"));
+        assertNull(ApposeEnvironments.cudaBuildFor("2.0"));
+    }
+
+    @Test
+    void anUnreadableCapabilityFallsBackToTheOlderBuild() {
+        // A driver too old to report the capability predates every card that needs cu130.
+        assertEquals("cu126", ApposeEnvironments.cudaBuildFor(null));
+        assertEquals("cu126", ApposeEnvironments.cudaBuildFor(""));
+        assertEquals("cu126", ApposeEnvironments.cudaBuildFor("N/A"));
     }
 
     @Test

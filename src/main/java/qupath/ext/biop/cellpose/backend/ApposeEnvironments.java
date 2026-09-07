@@ -36,6 +36,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
  * Builds and caches the Appose (pixi) environment used by the in-process {@link ApposeBackend}.
@@ -382,34 +383,122 @@ final class ApposeEnvironments {
     }
 
     /**
-     * Resolve whether the in-process backend should run on the GPU, detecting one for
-     * {@link CellposeDevice#AUTO}.
+     * Resolve which CUDA build the in-process backend should use, if any.
      *
      * @param device the requested device (never null)
-     * @return true to activate the CUDA sub-environment and request GPU execution
+     * @return {@code cu126} or {@code cu130}, or null to use the CPU build
      */
-    static boolean resolveUseGpu(CellposeDevice device) {
-        switch (device) {
-            case GPU:
-                return true;
-            case CPU:
-                return false;
-            case AUTO:
-            default:
-                return hasCuda();
+    static String cudaVariant(CellposeDevice device) {
+        if (device == CellposeDevice.CPU)
+            return null;
+        String nvidiaSmi = nvidiaSmi();
+        if (nvidiaSmi == null) {
+            if (device == CellposeDevice.GPU)
+                logger.warn("The Cellpose Appose device is set to GPU, but no NVIDIA GPU was found; using the CPU environment");
+            return null;
         }
+        String capability = computeCapability(nvidiaSmi);
+        String build = cudaBuildFor(capability);
+        if (build == null) {
+            logger.warn("The GPU reports compute capability {}, which none of the bundled CUDA builds support; "
+                    + "using the CPU environment. The CUDA builds cover 5.0 and above.", capability);
+        } else {
+            logger.info("NVIDIA GPU compute capability {} -> {} environment",
+                    capability == null ? "unknown" : capability, build);
+        }
+        return build;
     }
 
     /**
-     * Name of the pixi sub-environment to activate for a given model family and resolved device.
+     * The CUDA build whose PyTorch supports a given GPU compute capability.
+     *
+     * <p>Measured architecture lists: {@code cu126} builds {@code sm_50..sm_90} and ships no PTX, so
+     * it cannot run anything newer; {@code cu130} builds {@code sm_75..sm_120} plus {@code
+     * compute_120} PTX, so it covers newer cards and can JIT for later ones. Where both apply,
+     * {@code cu126} wins so that machines with an environment already built do not have to download
+     * another one.
+     *
+     * @param computeCapability the capability as reported by nvidia-smi, e.g. {@code 8.6}, or null
+     *                          if it could not be read
+     * @return the sub-environment suffix, or null if no bundled CUDA build supports the card
+     */
+    static String cudaBuildFor(String computeCapability) {
+        // A driver too old to report the capability predates every card that needs cu130.
+        if (computeCapability == null || computeCapability.isBlank())
+            return "cu126";
+        int capability;
+        try {
+            String[] parts = computeCapability.strip().split("\\.");
+            capability = Integer.parseInt(parts[0]) * 10
+                    + (parts.length > 1 ? Integer.parseInt(parts[1]) : 0);
+        } catch (RuntimeException e) {
+            logger.warn("Could not read the GPU compute capability from '{}'; assuming cu126", computeCapability);
+            return "cu126";
+        }
+        if (capability < 50)
+            return null;
+        if (capability <= 90)
+            return "cu126";
+        return "cu130";
+    }
+
+    /**
+     * Name of the pixi sub-environment to activate for a given model family and CUDA build.
      *
      * @param cellposeSam true for the Cellpose-SAM (Cellpose 4) family, false for Cellpose 3
-     * @param useGpu      the resolved GPU/CPU choice (see {@link #resolveUseGpu(CellposeDevice)})
-     * @return the sub-environment name, e.g. {@code cp3-cpu} or {@code cp4-cu126}
+     * @param cudaVariant the CUDA build, or null for the CPU build (see {@link #cudaVariant})
+     * @return the sub-environment name, e.g. {@code cp3-cpu} or {@code cp4-cu130}
      */
-    static String envName(boolean cellposeSam, boolean useGpu) {
+    static String envName(boolean cellposeSam, String cudaVariant) {
         String family = cellposeSam ? "cp4" : "cp3";
-        return family + "-" + (useGpu ? "cu126" : "cpu");
+        return family + "-" + (cudaVariant == null ? "cpu" : cudaVariant);
+    }
+
+    /**
+     * Compute capability of the first GPU nvidia-smi reports, e.g. {@code 8.6}.
+     *
+     * @param nvidiaSmi the nvidia-smi executable to run
+     * @return the capability, or null if it could not be read
+     */
+    private static String computeCapability(String nvidiaSmi) {
+        String output = runQuietly(List.of(nvidiaSmi, "--query-gpu=compute_cap", "--format=csv,noheader"));
+        if (output == null)
+            return null;
+        List<String> capabilities = output.lines()
+                .map(String::strip)
+                .filter(line -> !line.isEmpty() && !line.startsWith("["))
+                .collect(Collectors.toList());
+        if (capabilities.isEmpty())
+            return null;
+        if (capabilities.stream().distinct().count() > 1) {
+            logger.warn("GPUs with differing compute capabilities are present ({}); selecting the CUDA build for {}",
+                    String.join(", ", capabilities), capabilities.get(0));
+        }
+        return capabilities.get(0);
+    }
+
+    /**
+     * Run a command and return its output, or null if it fails or times out.
+     *
+     * @param command the command and its arguments
+     * @return the combined output, or null
+     */
+    private static String runQuietly(List<String> command) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            if (!process.waitFor(15, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return null;
+            }
+            return process.exitValue() == 0 ? output : null;
+        } catch (IOException | InterruptedException e) {
+            if (e instanceof InterruptedException)
+                Thread.currentThread().interrupt();
+            return null;
+        }
     }
 
     /**
@@ -449,27 +538,28 @@ final class ApposeEnvironments {
     }
 
     /**
-     * Best-effort check for an available NVIDIA GPU, by running {@code nvidia-smi} from the PATH and,
-     * on Windows, from {@code System32} and whatever {@code where} resolves. Always false on macOS.
+     * Locate a working {@code nvidia-smi}: the PATH first and, on Windows, {@code System32} and
+     * whatever {@code where} resolves. Always null on macOS, which has no NVIDIA support.
      *
-     * @return true if an NVIDIA GPU appears to be available
+     * @return the executable to run, or null if no NVIDIA GPU appears to be available
      */
-    private static boolean hasCuda() {
+    private static String nvidiaSmi() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         if (os.contains("mac") || os.contains("darwin"))
-            return false;
+            return null;
         boolean windows = os.contains("win");
 
         if (detectCuda(List.of("nvidia-smi")))
-            return true;
+            return "nvidia-smi";
         if (windows) {
-            if (detectCuda(List.of("C:\\Windows\\System32\\nvidia-smi.exe")))
-                return true;
+            String system32 = "C:\\Windows\\System32\\nvidia-smi.exe";
+            if (detectCuda(List.of(system32)))
+                return system32;
             String resolved = whereWindows("nvidia-smi");
             if (resolved != null && detectCuda(List.of(resolved)))
-                return true;
+                return resolved;
         }
-        return false;
+        return null;
     }
 
     /** Run a candidate nvidia-smi command; true if it exits 0 or prints a recognizable driver line. */

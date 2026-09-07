@@ -291,8 +291,9 @@ public class ApposeBackend implements CellposeBackend {
         if (worker != null)
             return;
 
-        this.useGpu = ApposeEnvironments.resolveUseGpu(params.getDevice());
-        String envName = ApposeEnvironments.envName(params.isCellposeSam(), useGpu);
+        String cudaVariant = ApposeEnvironments.cudaVariant(params.getDevice());
+        this.useGpu = cudaVariant != null;
+        String envName = ApposeEnvironments.envName(params.isCellposeSam(), cudaVariant);
         String scriptName = params.isCellposeSam() ? "cp4.py" : "cp3.py";
         String initName = params.isCellposeSam() ? "cp4_init.py" : "cp3_init.py";
 
@@ -330,8 +331,8 @@ public class ApposeBackend implements CellposeBackend {
         // Windows. init() replaces rather than appends, so this is one combined string.
         String init = "import numpy\n" + parentWatcherSnippet() + cpUtils;
 
-        logger.info("Starting Appose Cellpose service (device={} -> environment {}, use_gpu={})",
-                params.getDevice(), envName, ApposeEnvironments.resolveUseGpu(params.getDevice()));
+        logger.info("Starting Appose Cellpose service (device={} -> environment {})",
+                params.getDevice(), envName);
         try {
             Service created = ApposeEnvironments.withExtensionClassLoader(() -> {
                 Service svc = ApposeEnvironments.getEnvironment().activate(envName).python();
