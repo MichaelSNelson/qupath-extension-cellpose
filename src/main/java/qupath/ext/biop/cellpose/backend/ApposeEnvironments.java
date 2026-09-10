@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import javafx.scene.control.ButtonType;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
@@ -79,10 +80,11 @@ final class ApposeEnvironments {
     /**
      * Build (once) and return the shared Appose environment from the vendored pixi manifest.
      *
+     * @param envName the sub-environment that will be activated, reported by the first-build prompt
      * @return the shared Appose environment
-     * @throws IOException if the pixi manifest cannot be read or the environment cannot be built
+     * @throws IOException if the manifest cannot be read, the build fails, or the user cancels it
      */
-    static Environment getEnvironment() throws IOException {
+    static Environment getEnvironment(String envName) throws IOException {
         Environment local = environment;
         if (local != null && getEnvironmentPath().equals(builtAt))
             return local;
@@ -99,7 +101,7 @@ final class ApposeEnvironments {
                 String pixiToml = readResource("pixi.toml");
                 String pixiLock = readResource("pixi.lock");
 
-                promptForEnvironmentLocationOnFirstRun();
+                confirmFirstBuild(envName);
 
                 Path envDir = getEnvironmentPath();
                 boolean firstBuild = !Files.exists(envDir.resolve(".pixi"));
@@ -315,42 +317,92 @@ final class ApposeEnvironments {
     }
 
     /**
-     * On the very first build, offer to put the multi-GB environment somewhere other than the
-     * default. Does nothing when a location is already configured, when an environment already
-     * exists, or when headless.
+     * Whether a dialog or notification can be shown at all.
+     *
+     * <p>{@code GraphicsEnvironment.isHeadless()} is false when QuPath runs a script from the
+     * command line, but the JavaFX toolkit is never started there, so every dialog throws
+     * {@code ExceptionInInitializerError} -- an {@code Error}, which a catch for
+     * {@code RuntimeException} does not cover.
+     *
+     * @return true if there is a running QuPath window to show it in
      */
-    private static void promptForEnvironmentLocationOnFirstRun() {
-        if (!CellposeExtension.getApposeEnvDirPreference().isEmpty())
-            return; // the user has already chosen
-        if (Files.exists(getEnvironmentPath().resolve(".pixi")))
-            return; // already built in the default location; leave it alone
+    private static boolean canPrompt() {
         if (GraphicsEnvironment.isHeadless())
+            return false;
+        try {
+            return qupath.lib.gui.QuPathGUI.getInstance() != null;
+        } catch (RuntimeException | LinkageError e) {
+            return false;
+        }
+    }
+
+    /**
+     * Before the very first build, say what will be installed and where, and let the user stop.
+     *
+     * <p>Does nothing when an environment already exists or when headless.
+     *
+     * @param envName the sub-environment that will be activated, e.g. {@code cp3-cu126}
+     * @throws IOException if the user cancels
+     */
+    private static void confirmFirstBuild(String envName) throws IOException {
+        if (Files.exists(getEnvironmentPath().resolve(".pixi")))
+            return; // already built; nothing to decide
+        if (!canPrompt())
             return;
 
-        try {
-            Path defaultBase = getEnvironmentBase();
-            boolean choose = qupath.fx.dialogs.Dialogs.showYesNoDialog(
-                    "Cellpose",
-                    "The in-process (Appose) backend needs to build a Python environment of several "
-                            + "gigabytes.\n\nIt will go in:\n" + defaultBase + "\n\n"
-                            + "Choose a different location?\n\n"
-                            + "This is worth doing on a shared workstation, where every user would "
-                            + "otherwise get their own copy on the system drive. You can change it later "
-                            + "in Edit > Preferences > Cellpose.");
-            if (!choose)
+        while (true) {
+            ButtonType answer;
+            try {
+                answer = qupath.fx.dialogs.Dialogs.showYesNoCancelDialog("Cellpose",
+                        "Cellpose needs to build a Python environment before it can run.\n\n"
+                                + "Graphics:  " + acceleratorDescription() + "\n"
+                                + "Installs:  " + envName + "\n"
+                                + "Location:  " + getEnvironmentPath() + "\n"
+                                + "Size:      several GB, which can take a few minutes\n\n"
+                                + "Yes     -- build it here\n"
+                                + "No      -- choose a different location first\n"
+                                + "Cancel  -- stop, so a driver or CUDA problem can be fixed first\n\n"
+                                + "The location is worth changing on a shared workstation, where every "
+                                + "user would otherwise get their own copy on the system drive. Both "
+                                + "this and the compute device can be changed later in "
+                                + "Edit > Preferences > Cellpose.");
+            } catch (RuntimeException | LinkageError e) {
+                // A prompt that cannot be shown must not stop a run that would otherwise work.
+                logger.debug("Could not confirm the Cellpose environment build: {}", e.getMessage());
                 return;
+            }
+
+            if (ButtonType.YES.equals(answer))
+                return;
+            if (ButtonType.CANCEL.equals(answer) || answer == null)
+                throw new IOException("Building the Cellpose Python environment was cancelled");
 
             File chosen = qupath.fx.dialogs.FileChoosers.promptForDirectory(
-                    "Where should the Cellpose Python environment go?", defaultBase.toFile());
-            if (chosen == null)
-                return; // cancelled: fall through to the default
-
-            CellposeExtension.setApposeEnvDirPreference(chosen.getAbsolutePath());
-            logger.info("Cellpose Appose environment directory set to {}", chosen.getAbsolutePath());
-        } catch (RuntimeException e) {
-            // The default location is always usable, so a failed prompt must not stop the run.
-            logger.debug("Could not prompt for the environment location: {}", e.getMessage());
+                    "Where should the Cellpose Python environment go?", getEnvironmentBase().toFile());
+            if (chosen != null) {
+                CellposeExtension.setApposeEnvDirPreference(chosen.getAbsolutePath());
+                logger.info("Cellpose Appose environment directory set to {}", chosen.getAbsolutePath());
+            }
+            // Round again, so the user sees the location they just chose before committing to it.
         }
+    }
+
+    /**
+     * One line describing what will run the model, for the first-build prompt.
+     *
+     * @return the GPU and its compute capability, or why the CPU will be used
+     */
+    private static String acceleratorDescription() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (os.contains("mac") || os.contains("darwin"))
+            return "no NVIDIA GPU on macOS; Apple Metal (MPS) is used when available";
+        String nvidiaSmi = nvidiaSmi();
+        if (nvidiaSmi == null)
+            return "no NVIDIA GPU detected; the CPU build will be installed";
+        String details = runQuietly(List.of(nvidiaSmi, "--query-gpu=name,compute_cap", "--format=csv,noheader"));
+        String first = details == null ? null : details.lines()
+                .map(String::strip).filter(line -> !line.isEmpty()).findFirst().orElse(null);
+        return first == null ? "an NVIDIA GPU was detected" : first;
     }
 
     /**
@@ -672,10 +724,10 @@ final class ApposeEnvironments {
                 + "multi-GB Python/PyTorch/Cellpose environment and may take several minutes. "
                 + "Progress is shown in Extensions > Cellpose > Python console.";
         logger.info(message);
-        if (!GraphicsEnvironment.isHeadless()) {
+        if (canPrompt()) {
             try {
                 qupath.fx.dialogs.Dialogs.showInfoNotification("Cellpose", message);
-            } catch (RuntimeException e) {
+            } catch (RuntimeException | LinkageError e) {
                 logger.debug("Could not show first-run notification: {}", e.getMessage());
             }
         }
@@ -691,10 +743,10 @@ final class ApposeEnvironments {
                 + "3. Delete the folder " + pixiDir + "\n"
                 + "4. Relaunch QuPath and run Cellpose again.";
         logger.warn(message);
-        if (!GraphicsEnvironment.isHeadless()) {
+        if (canPrompt()) {
             try {
                 qupath.fx.dialogs.Dialogs.showWarningNotification("Cellpose environment locked", message);
-            } catch (RuntimeException e) {
+            } catch (RuntimeException | LinkageError e) {
                 logger.debug("Could not show file-lock notification: {}", e.getMessage());
             }
         }
