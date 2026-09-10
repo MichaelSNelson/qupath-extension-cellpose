@@ -96,6 +96,7 @@ public class ApposeBackend implements CellposeBackend {
     private Worker worker;
     private String envName;
     private CellposeSegmentationParams workerParams;
+    private CellposeDevice workerDevice;
     /** True while recovering from a dead worker, so a failure there cannot recurse. */
     private boolean recovering;
     private String runScript;
@@ -331,12 +332,13 @@ public class ApposeBackend implements CellposeBackend {
 
         this.envName = envName;
         this.workerParams = params;
+        this.workerDevice = device;
 
         boolean reused;
         synchronized (ApposeBackend.class) {
             reused = WORKERS.containsKey(envName);
         }
-        this.worker = acquireWorker(envName, params);
+        this.worker = acquireWorker(envName, params, device);
 
         // A worker idle since the last run can die on its first task -- before any Python runs --
         // and Appose relaunches that task as a zombie we cannot see. Spend the death on a task with
@@ -363,7 +365,8 @@ public class ApposeBackend implements CellposeBackend {
     }
 
     /** Reuse the worker for this environment if one is already running, otherwise start one. */
-    private static synchronized Worker acquireWorker(String envName, CellposeSegmentationParams params) throws IOException {
+    private static synchronized Worker acquireWorker(String envName, CellposeSegmentationParams params,
+                                                     CellposeDevice device) throws IOException {
         // A worker holds a Python process rooted in the environment it was started from, so a moved
         // environment directory means every cached worker is pointing at the old one. Reentrant on
         // this monitor; done here rather than in ApposeEnvironments because the lock order is
@@ -390,8 +393,7 @@ public class ApposeBackend implements CellposeBackend {
         // Windows. init() replaces rather than appends, so this is one combined string.
         String init = "import numpy\n" + parentWatcherSnippet() + cpUtils;
 
-        logger.info("Starting Appose Cellpose service (device={} -> environment {})",
-                params.getDevice(), envName);
+        logger.info("Starting Appose Cellpose service (device={} -> environment {})", device, envName);
         try {
             Service created = ApposeEnvironments.withExtensionClassLoader(() -> {
                 Service svc = ApposeEnvironments.getEnvironment().activate(envName).python();
@@ -406,6 +408,7 @@ public class ApposeBackend implements CellposeBackend {
                 return svc;
             });
             LIVE_SERVICES.add(created);
+            logger.info("Cellpose is running in the {} environment ({})", envName, device);
             Worker w = new Worker(created);
             WORKERS.put(envName, w);
             return w;
@@ -633,7 +636,7 @@ public class ApposeBackend implements CellposeBackend {
             closeWorker(dead);
         recovering = true;
         try {
-            this.worker = acquireWorker(envName, workerParams);
+            this.worker = acquireWorker(envName, workerParams, workerDevice);
             // The replacement holds no model, and a tile submitted without one segments nothing.
             if (workerParams != null)
                 initializeModel(workerParams);

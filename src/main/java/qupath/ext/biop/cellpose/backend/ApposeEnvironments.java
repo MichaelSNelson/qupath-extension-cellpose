@@ -414,7 +414,7 @@ final class ApposeEnvironments {
         String details = runQuietly(List.of(nvidiaSmi, "--query-gpu=name,compute_cap", "--format=csv,noheader"));
         String first = details == null ? null : details.lines()
                 .map(String::strip).filter(line -> !line.isEmpty()).findFirst().orElse(null);
-        String capability = computeCapability(nvidiaSmi);
+        String capability = computeCapability();
         String build = cudaBuildFor(capability);
         if (build == null)
             return new GpuOutlook(false, (first == null ? "the GPU" : first)
@@ -467,7 +467,7 @@ final class ApposeEnvironments {
                 logger.warn("The Cellpose Appose device is set to GPU, but no NVIDIA GPU was found; using the CPU environment");
             return null;
         }
-        String capability = computeCapability(nvidiaSmi);
+        String capability = computeCapability();
         String build = cudaBuildFor(capability);
         if (build == null) {
             logger.warn("The GPU reports compute capability {}, which none of the bundled CUDA builds support; "
@@ -546,7 +546,7 @@ final class ApposeEnvironments {
      * @param nvidiaSmi the nvidia-smi executable to run
      * @return the capability, or null if it could not be read
      */
-    private static String computeCapability(String nvidiaSmi) {
+    private static String readComputeCapability(String nvidiaSmi) {
         String output = runQuietly(List.of(nvidiaSmi, "--query-gpu=compute_cap", "--format=csv,noheader"));
         if (output == null)
             return null;
@@ -629,7 +629,40 @@ final class ApposeEnvironments {
      *
      * @return the executable to run, or null if no NVIDIA GPU appears to be available
      */
+    /**
+     * Detection results, cached for the session: the hardware does not change while QuPath runs,
+     * and every detection call spawns nvidia-smi, which a project batch would do once per image.
+     */
+    private static final Object GPU_LOCK = new Object();
+    private static boolean gpuProbed;
+    private static String nvidiaSmiPath;
+    private static String computeCapabilityValue;
+
     private static String nvidiaSmi() {
+        probeGpu();
+        return nvidiaSmiPath;
+    }
+
+    /** Compute capability of the first GPU, e.g. {@code 8.6}, or null if there is none to ask. */
+    private static String computeCapability() {
+        probeGpu();
+        return computeCapabilityValue;
+    }
+
+    private static void probeGpu() {
+        if (gpuProbed)
+            return;
+        // Deliberately not the environment-build lock, which is held for the length of a build.
+        synchronized (GPU_LOCK) {
+            if (gpuProbed)
+                return;
+            nvidiaSmiPath = locateNvidiaSmi();
+            computeCapabilityValue = nvidiaSmiPath == null ? null : readComputeCapability(nvidiaSmiPath);
+            gpuProbed = true;
+        }
+    }
+
+    private static String locateNvidiaSmi() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         if (os.contains("mac") || os.contains("darwin"))
             return null;
