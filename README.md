@@ -255,6 +255,34 @@ specified, assuming it is dim 0`) and returns an empty mask without raising an e
 number that does not exist in the exported tile is now reported as such, rather than surfacing as
 an index error from inside Python.
 
+### Headless and cluster use
+
+No GUI is needed. The first-run prompt is skipped when there is no QuPath window, so a headless
+run just builds the environment and proceeds, and everything it would have asked can be set from
+the script:
+
+```groovy
+import qupath.ext.biop.cellpose.CellposeExtension
+import qupath.ext.biop.cellpose.backend.CellposeDevice
+
+// Keep the multi-GB environment off a quota-limited home directory
+CellposeExtension.setApposeEnvDirPreference("/scratch/me/cellpose-env")
+
+def cellpose = Cellpose2D.builder("cyto3")
+        .useAppose()
+        .device(CellposeDevice.CPU)   // or GPU, or omit for automatic detection
+        // ... the rest as usual
+        .build()
+```
+
+Two things worth knowing before submitting a job array:
+
+- **Build the environment once first.** The first build needs network access and downloads
+  several GB. Nothing coordinates a first build across separate processes, so run one job to
+  completion before launching the rest against the same environment directory.
+- **After that, no network is needed.** Once the environment exists, the install step completes
+  with every network request refused, so compute nodes without outbound access are fine.
+
 ### Where the environment lives
 
 By default the environment goes to Appose's usual location
