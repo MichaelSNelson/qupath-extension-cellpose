@@ -292,7 +292,7 @@ public class ApposeBackend implements CellposeBackend {
             return;
 
         String cudaVariant = ApposeEnvironments.cudaVariant(params.getDevice());
-        this.useGpu = cudaVariant != null;
+        this.useGpu = ApposeEnvironments.requestGpu(params.getDevice());
         String envName = ApposeEnvironments.envName(params.isCellposeSam(), cudaVariant);
         String scriptName = params.isCellposeSam() ? "cp4.py" : "cp3.py";
         String initName = params.isCellposeSam() ? "cp4_init.py" : "cp3_init.py";

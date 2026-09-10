@@ -410,6 +410,22 @@ final class ApposeEnvironments {
     }
 
     /**
+     * Whether Python should be asked for a GPU.
+     *
+     * <p>Deliberately not the same question as {@link #cudaVariant(CellposeDevice)}. macOS has no
+     * CUDA build, so it always gets the CPU environment, but its PyTorch carries MPS -- and
+     * {@code cp_utils.get_torch_device} resolves CUDA, then MPS, then CPU only when it is asked for
+     * a GPU at all. Tying this to the CUDA variant would silently disable MPS on Apple Silicon.
+     * Where no accelerator exists the Python side falls back to CPU on its own.
+     *
+     * @param device the requested device (never null)
+     * @return false only when the user asked for CPU
+     */
+    static boolean requestGpu(CellposeDevice device) {
+        return device != CellposeDevice.CPU;
+    }
+
+    /**
      * The CUDA build whose PyTorch supports a given GPU compute capability.
      *
      * <p>Measured architecture lists: {@code cu126} builds {@code sm_50..sm_90} and ships no PTX, so

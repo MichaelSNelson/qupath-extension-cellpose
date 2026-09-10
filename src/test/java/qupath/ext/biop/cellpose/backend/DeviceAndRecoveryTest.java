@@ -47,6 +47,15 @@ class DeviceAndRecoveryTest {
     }
 
     @Test
+    void aGpuIsRequestedUnlessCpuWasAskedFor() {
+        // macOS gets the CPU environment but still has MPS, and cp_utils only looks for an
+        // accelerator when it is asked for one.
+        assertFalse(ApposeEnvironments.requestGpu(CellposeDevice.CPU));
+        assertTrue(ApposeEnvironments.requestGpu(CellposeDevice.AUTO));
+        assertTrue(ApposeEnvironments.requestGpu(CellposeDevice.GPU));
+    }
+
+    @Test
     void envNameCombinesFamilyAndCudaBuild() {
         assertEquals("cp3-cpu", ApposeEnvironments.envName(false, null));
         assertEquals("cp3-cu126", ApposeEnvironments.envName(false, "cu126"));

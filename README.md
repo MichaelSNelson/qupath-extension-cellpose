@@ -210,6 +210,11 @@ only one that runs Blackwell (RTX 50 series). The compute capability reported by
 selects between them, and a card too old for either falls back to the CPU environment with a
 warning. The environment chosen is logged when the Python worker starts.
 
+On macOS there is no CUDA, so the CPU environment is installed -- but Apple Silicon PyTorch carries
+MPS, and the vendored scripts resolve CUDA, then MPS, then CPU. Setting the device to anything
+other than `CPU` therefore still gets Metal acceleration on an M-series Mac. The device actually
+used is reported by the Python worker (`CP3: Start Cellpose (device=...)`).
+
 Everything downstream of segmentation (candidate extraction, measurements, `PathObject`
 construction) is untouched. Provenance notes are in [`NOTICE`](NOTICE): the vendored Python
 scripts are BSD-3-Clause from
