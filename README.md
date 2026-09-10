@@ -203,6 +203,13 @@ It is **off by default** and changes nothing about the existing subprocess workf
 Scripts can also select it directly with `CellposeBuilder.useAppose()`, which overrides the
 preference for that run.
 
+Which CUDA build gets installed is chosen from the card, not fixed. The bundled `cu126` and
+`cu130` PyTorch builds cover different GPUs -- `cu126` has `sm_50`-`sm_90` and no PTX, `cu130` has
+`sm_75`-`sm_120` -- so `cu126` is the only one that runs Maxwell and Pascal cards and `cu130` the
+only one that runs Blackwell (RTX 50 series). The compute capability reported by `nvidia-smi`
+selects between them, and a card too old for either falls back to the CPU environment with a
+warning. The environment chosen is logged when the Python worker starts.
+
 Everything downstream of segmentation (candidate extraction, measurements, `PathObject`
 construction) is untouched. Provenance notes are in [`NOTICE`](NOTICE): the vendored Python
 scripts are BSD-3-Clause from
