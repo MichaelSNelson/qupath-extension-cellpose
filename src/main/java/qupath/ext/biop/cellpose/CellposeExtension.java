@@ -183,10 +183,10 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
                 .name("Cellpose processing type")
                 .category("Cellpose/Omnipose")
                 .description("How Cellpose runs when detecting objects.\n\n"
-                        + "Python installation - standard (default): runs Cellpose from a Python "
+                        + "User's Python installation - standard (default): runs Cellpose from a Python "
                         + "installation you set up yourself, using the paths above, writing each "
                         + "image tile to a temporary file.\n\n"
-                        + "Appose - faster, installs its own Python: runs Cellpose inside QuPath and "
+                        + "Appose - runs faster, self-setup: runs Cellpose inside QuPath and "
                         + "builds its own Python environment the first time it is used, which is a "
                         + "multi-GB download taking several minutes. After that, tiles stay in memory "
                         + "and the Python process is reused between runs.\n\n"

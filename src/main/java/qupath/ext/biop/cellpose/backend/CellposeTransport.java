@@ -23,10 +23,10 @@ public enum CellposeTransport {
      * Run Cellpose as an external Python process, exchanging images through temporary TIFF files.
      * This is the default.
      */
-    SUBPROCESS("Python installation - standard"),
+    SUBPROCESS("User's Python installation - standard"),
 
     /** Run Cellpose in-process through Appose, exchanging images through shared memory. */
-    APPOSE("Appose - faster, installs its own Python");
+    APPOSE("Appose - runs faster, self-setup");
 
     private final String label;
 
