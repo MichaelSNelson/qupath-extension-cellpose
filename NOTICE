@@ -19,13 +19,22 @@ The following Python scripts and pixi manifest, bundled under
         cp3_init.py
         cp4_init.py
         pixi.toml
-are vendored verbatim (with their original license headers preserved) from the
+are vendored (with their original license headers preserved) from the
 imglib2-cellpose project:
 
     Project : imglib2-cellpose
     Source  : https://github.com/Image-Analysis-Hub/imglib2-cellpose
     Commit  : 95d6f221ad099eb3731fa8afbced80b56d62eeb6
     License : BSD-3-Clause
+
+The Python scripts are byte-identical to that commit. pixi.toml carries ONE
+modification, marked by a comment in the file: its `default` environment is
+empty rather than `["cp3", "cu126"]`. Appose runs `pixi install` with no
+--environment before activating a named one, so the default environment is
+installed on every machine; as inherited, that meant every machine downloaded a
+CUDA PyTorch, including machines that go on to use the CPU environment and can
+never run it. The accompanying pixi.lock is generated from this manifest and is
+not part of the upstream project.
 
 In addition, the Appose environment-build and service/model lifecycle used by the
 in-process backend (the classes ApposeBackend and ApposeEnvironments under

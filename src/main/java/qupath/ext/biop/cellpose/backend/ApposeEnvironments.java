@@ -80,11 +80,10 @@ final class ApposeEnvironments {
     /**
      * Build (once) and return the shared Appose environment from the vendored pixi manifest.
      *
-     * @param envName the sub-environment that will be activated, reported by the first-build prompt
      * @return the shared Appose environment
-     * @throws IOException if the manifest cannot be read, the build fails, or the user cancels it
+     * @throws IOException if the pixi manifest cannot be read or the environment cannot be built
      */
-    static Environment getEnvironment(String envName) throws IOException {
+    static Environment getEnvironment() throws IOException {
         Environment local = environment;
         if (local != null && getEnvironmentPath().equals(builtAt))
             return local;
@@ -100,8 +99,6 @@ final class ApposeEnvironments {
             if (environment == null) {
                 String pixiToml = readResource("pixi.toml");
                 String pixiLock = readResource("pixi.lock");
-
-                confirmFirstBuild(envName);
 
                 Path envDir = getEnvironmentPath();
                 boolean firstBuild = !Files.exists(envDir.resolve(".pixi"));
@@ -337,73 +334,94 @@ final class ApposeEnvironments {
     }
 
     /**
-     * Before the very first build, say what will be installed and where, and let the user stop.
+     * Before the very first build, let the user pick CPU or GPU, and where it goes.
      *
-     * <p>Does nothing when an environment already exists or when headless.
+     * <p>Returns the requested device unchanged when an environment already exists or when no
+     * dialog can be shown, so scripted and headless runs are unaffected.
      *
-     * @param envName the sub-environment that will be activated, e.g. {@code cp3-cu126}
+     * @param requested the device the preference or the builder asked for
+     * @return the device to install and use
      * @throws IOException if the user cancels
      */
-    private static void confirmFirstBuild(String envName) throws IOException {
+    static CellposeDevice chooseDeviceOnFirstBuild(CellposeDevice requested) throws IOException {
         if (Files.exists(getEnvironmentPath().resolve(".pixi")))
-            return; // already built; nothing to decide
+            return requested; // already built; nothing to decide
         if (!canPrompt())
-            return;
+            return requested;
+
+        GpuOutlook outlook = gpuOutlook();
+        String gpuChoice = "GPU -- " + outlook.description();
+        String cpuChoice = "CPU -- always works, but segmentation is slower";
+        String elsewhere = "Choose a different location first...";
 
         while (true) {
-            ButtonType answer;
+            String preferred = requested == CellposeDevice.CPU ? cpuChoice
+                    : (outlook.likely() ? gpuChoice : cpuChoice);
+            String answer;
             try {
-                answer = qupath.fx.dialogs.Dialogs.showYesNoCancelDialog("Cellpose",
+                answer = qupath.fx.dialogs.Dialogs.showChoiceDialog("Cellpose",
                         "Cellpose needs to build a Python environment before it can run.\n\n"
-                                + "Graphics:  " + acceleratorDescription() + "\n"
-                                + "Installs:  " + envName + "\n"
                                 + "Location:  " + getEnvironmentPath() + "\n"
                                 + "Size:      several GB, which can take a few minutes\n\n"
-                                + "Yes     -- build it here\n"
-                                + "No      -- choose a different location first\n"
-                                + "Cancel  -- stop, so a driver or CUDA problem can be fixed first\n\n"
-                                + "The location is worth changing on a shared workstation, where every "
-                                + "user would otherwise get their own copy on the system drive. Both "
-                                + "this and the compute device can be changed later in "
-                                + "Edit > Preferences > Cellpose.");
+                                + "This sets the Cellpose Appose device preference, which can be "
+                                + "changed later in Edit > Preferences > Cellpose. Cancel stops "
+                                + "before anything is downloaded.",
+                        new String[] {gpuChoice, cpuChoice, elsewhere}, preferred);
             } catch (RuntimeException | LinkageError e) {
                 // A prompt that cannot be shown must not stop a run that would otherwise work.
-                logger.debug("Could not confirm the Cellpose environment build: {}", e.getMessage());
-                return;
+                logger.debug("Could not ask which Cellpose environment to build: {}", e.getMessage());
+                return requested;
             }
 
-            if (ButtonType.YES.equals(answer))
-                return;
-            if (ButtonType.CANCEL.equals(answer) || answer == null)
+            if (answer == null)
                 throw new IOException("Building the Cellpose Python environment was cancelled");
-
-            File chosen = qupath.fx.dialogs.FileChoosers.promptForDirectory(
-                    "Where should the Cellpose Python environment go?", getEnvironmentBase().toFile());
-            if (chosen != null) {
-                CellposeExtension.setApposeEnvDirPreference(chosen.getAbsolutePath());
-                logger.info("Cellpose Appose environment directory set to {}", chosen.getAbsolutePath());
+            if (elsewhere.equals(answer)) {
+                File chosen = qupath.fx.dialogs.FileChoosers.promptForDirectory(
+                        "Where should the Cellpose Python environment go?", getEnvironmentBase().toFile());
+                if (chosen != null) {
+                    CellposeExtension.setApposeEnvDirPreference(chosen.getAbsolutePath());
+                    logger.info("Cellpose Appose environment directory set to {}", chosen.getAbsolutePath());
+                    if (Files.exists(getEnvironmentPath().resolve(".pixi")))
+                        return requested; // an environment already exists there
+                }
+                continue; // round again, so the chosen path is on screen before committing to it
             }
-            // Round again, so the user sees the location they just chose before committing to it.
+
+            CellposeDevice device = gpuChoice.equals(answer) ? CellposeDevice.GPU : CellposeDevice.CPU;
+            CellposeExtension.setDevicePreference(device);
+            logger.info("Cellpose Appose device set to {} for the first environment build", device);
+            return device;
         }
     }
 
+    /** Whether the GPU is likely to work here, and a line saying why. */
+    private record GpuOutlook(boolean likely, String description) {}
+
     /**
-     * One line describing what will run the model, for the first-build prompt.
+     * Assess whether this machine can actually use a GPU, for the first-build prompt.
      *
-     * @return the GPU and its compute capability, or why the CPU will be used
+     * @return the outlook and a description naming the hardware where there is any
      */
-    private static String acceleratorDescription() {
+    private static GpuOutlook gpuOutlook() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         if (os.contains("mac") || os.contains("darwin"))
-            return "no NVIDIA GPU on macOS; Apple Metal (MPS) is used when available";
+            return new GpuOutlook(true, "Apple Metal (MPS), used when available on Apple Silicon");
+
         String nvidiaSmi = nvidiaSmi();
         if (nvidiaSmi == null)
-            return "no NVIDIA GPU detected; the CPU build will be installed";
+            return new GpuOutlook(false, "no NVIDIA GPU detected on this system");
+
         String details = runQuietly(List.of(nvidiaSmi, "--query-gpu=name,compute_cap", "--format=csv,noheader"));
         String first = details == null ? null : details.lines()
                 .map(String::strip).filter(line -> !line.isEmpty()).findFirst().orElse(null);
-        return first == null ? "an NVIDIA GPU was detected" : first;
+        String capability = computeCapability(nvidiaSmi);
+        String build = cudaBuildFor(capability);
+        if (build == null)
+            return new GpuOutlook(false, (first == null ? "the GPU" : first)
+                    + " is older than the bundled CUDA builds support");
+        return new GpuOutlook(true, (first == null ? "NVIDIA GPU detected" : first) + ", using " + build);
     }
+
 
     /**
      * @return the directory containing the environment: the user's chosen location, or the Appose

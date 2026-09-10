@@ -318,8 +318,10 @@ public class ApposeBackend implements CellposeBackend {
         if (worker != null)
             return;
 
-        String cudaVariant = ApposeEnvironments.cudaVariant(params.getDevice());
-        this.useGpu = ApposeEnvironments.requestGpu(params.getDevice());
+        // Asked before the device is resolved, because the answer decides which environment to build.
+        CellposeDevice device = ApposeEnvironments.chooseDeviceOnFirstBuild(params.getDevice());
+        String cudaVariant = ApposeEnvironments.cudaVariant(device);
+        this.useGpu = ApposeEnvironments.requestGpu(device);
         String envName = ApposeEnvironments.envName(params.isCellposeSam(), cudaVariant);
         String scriptName = params.isCellposeSam() ? "cp4.py" : "cp3.py";
         String initName = params.isCellposeSam() ? "cp4_init.py" : "cp3_init.py";
@@ -392,7 +394,7 @@ public class ApposeBackend implements CellposeBackend {
                 params.getDevice(), envName);
         try {
             Service created = ApposeEnvironments.withExtensionClassLoader(() -> {
-                Service svc = ApposeEnvironments.getEnvironment(envName).activate(envName).python();
+                Service svc = ApposeEnvironments.getEnvironment().activate(envName).python();
                 // stdout is the Appose IPC channel, so the debug callback is the only route by
                 // which Python diagnostics reach the user.
                 svc.debug(msg -> {

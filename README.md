@@ -210,6 +210,12 @@ only one that runs Blackwell (RTX 50 series). The compute capability reported by
 selects between them, and a card too old for either falls back to the CPU environment with a
 warning. The environment chosen is logged when the Python worker starts.
 
+The first build asks which to install, since it is the expensive choice to get wrong: CPU always
+works and is slower, and the GPU option says what was detected on this machine -- the card and its
+compute capability, or why it would not work. Whichever looks usable is preselected, the location
+can be changed from the same dialog, and cancelling stops before anything is downloaded. The answer
+is stored as the **Cellpose Appose device** preference and can be changed later.
+
 On macOS there is no CUDA, so the CPU environment is installed -- but Apple Silicon PyTorch carries
 MPS, and the vendored scripts resolve CUDA, then MPS, then CPU. Setting the device to anything
 other than `CPU` therefore still gets Metal acceleration on an M-series Mac. The device actually

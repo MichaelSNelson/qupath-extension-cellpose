@@ -90,7 +90,10 @@ cellpose = ">=4, <5"
 
 # --- Environments ---
 [environments]
-default = { features = ["cp3", "cu126"] }
+# Appose runs `pixi install` with no --environment before activating a named one, so the
+# default environment is installed on every machine. Keeping it empty means that install
+# costs only the base dependencies, instead of a CUDA PyTorch a CPU-only machine can never use.
+default = { features = [] }
 cp3-cpu = { features = ["cp3", "cpu"] }
 cp4-cpu = { features = ["cp4", "cpu"] }
 cp3-cu126 = { features = ["cp3", "cu126"] }

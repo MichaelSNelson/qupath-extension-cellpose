@@ -89,6 +89,15 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
         return cellposeApposeDevice.get();
     }
 
+    /**
+     * Set the compute device used by the in-process (Appose) transport.
+     *
+     * @param device the device to use; null is treated as {@link CellposeDevice#AUTO}
+     */
+    public static void setDevicePreference(CellposeDevice device) {
+        cellposeApposeDevice.set(device == null ? CellposeDevice.AUTO : device);
+    }
+
     private static final LinkedHashMap<String, String> SCRIPTS = new LinkedHashMap<>() {{
         put("Cellpose training script template", "scripts/Cellpose_training_template.groovy");
         put("Cellpose detection script template", "scripts/Cellpose_detection_template.groovy");
