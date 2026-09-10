@@ -34,6 +34,7 @@ import qupath.ext.biop.cellpose.ui.PythonConsoleWindow;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -79,14 +80,24 @@ public class ApposeBackend implements CellposeBackend {
 
     /**
      * Lock serializing the Cellpose call: the vendored scripts cache the model in a single Python
-     * global, so concurrent {@code model.eval} calls would race on it. It lives on the shared
-     * {@link Worker} rather than on this backend.
+     * global, so concurrent {@code model.eval} calls would race on it.
+     *
+     * <p>Scoped to the environment, not to the {@link Worker}, so that replacing a dead worker does
+     * not swap the monitor out from under a caller that is holding it.
      */
     private Object pythonLock() {
-        return worker.lock;
+        return pythonLockFor(envName);
+    }
+
+    private static Object pythonLockFor(String envName) {
+        return PYTHON_LOCKS.computeIfAbsent(envName, k -> new Object());
     }
 
     private Worker worker;
+    private String envName;
+    private CellposeSegmentationParams workerParams;
+    /** True while recovering from a dead worker, so a failure there cannot recurse. */
+    private boolean recovering;
     private String runScript;
     private String initScript;
     private boolean useGpu;
@@ -215,10 +226,14 @@ public class ApposeBackend implements CellposeBackend {
                 ? null
                 : Cp3Layout.resolve(params.getChannel1(), params.getChannel2(), imp.getStackSize());
 
-        NDArray input = allocate(() -> layout == null ? NDArrays.fromImagePlus(imp) : layout.pack(imp));
-        NDArray labels = allocate(() -> NDArrays.allocateLabels(width, height));
+        // Both allocations live inside the try: allocating the labels outside it would leak the
+        // input segment if that second allocation threw.
+        NDArray input = null;
+        NDArray labels = null;
         ShortProcessor labelProcessor;
         try {
+            input = allocate(() -> layout == null ? NDArrays.fromImagePlus(imp) : layout.pack(imp));
+            labels = allocate(() -> NDArrays.allocateLabels(width, height));
             Map<String, Object> inputs = buildInputs(params, imp.getStackSize(), layout, input, labels);
             synchronized (pythonLock()) {
                 submit(runScript, inputs, "Segmenting tile " + tile.getImageFile().getName());
@@ -248,8 +263,6 @@ public class ApposeBackend implements CellposeBackend {
      */
     private static final class Worker {
         final Service service;
-        /** Serializes the Cellpose call; see {@link ApposeBackend#pythonLock}. */
-        final Object lock = new Object();
         /** Model currently loaded in this worker, or null if none. */
         String loadedModel;
 
@@ -261,30 +274,44 @@ public class ApposeBackend implements CellposeBackend {
     /** Live workers, keyed by pixi sub-environment (model family + device). */
     private static final Map<String, Worker> WORKERS = new HashMap<>();
 
+    /** Cellpose-call monitors, keyed by the same environment name; outlive any one worker. */
+    private static final Map<String, Object> PYTHON_LOCKS = new ConcurrentHashMap<>();
+
     /** Shut down every cached Python worker, releasing the GPU memory they hold. */
-    public static synchronized void shutdownWorkers() {
-        if (WORKERS.isEmpty()) {
-            logger.info("No Cellpose Python worker is running");
-            return;
+    public static void shutdownWorkers() {
+        Map<String, Worker> snapshot;
+        // Snapshot under the class monitor and release it before taking any environment monitor:
+        // recovery takes them the other way round, and holding both here would deadlock against it.
+        synchronized (ApposeBackend.class) {
+            if (WORKERS.isEmpty()) {
+                logger.info("No Cellpose Python worker is running");
+                return;
+            }
+            snapshot = new LinkedHashMap<>(WORKERS);
+            WORKERS.clear();
         }
-        logger.info("Shutting down {} Cellpose Python worker(s)", WORKERS.size());
-        WORKERS.values().forEach(w -> {
+        logger.info("Shutting down {} Cellpose Python worker(s)", snapshot.size());
+        snapshot.forEach((envName, w) -> {
             // Wait for the tile in flight: this method is reachable from a menu item while a run is
             // in progress, and closing the service under a running model.eval kills it mid-tile.
-            synchronized (w.lock) {
-                try {
-                    ApposeEnvironments.withExtensionClassLoader(() -> {
-                        w.service.close();
-                        return null;
-                    });
-                } catch (Exception e) {
-                    logger.warn("Error closing Appose Cellpose service: {}", e.getMessage(), e);
-                } finally {
-                    LIVE_SERVICES.remove(w.service);
-                }
+            synchronized (pythonLockFor(envName)) {
+                closeWorker(w);
             }
         });
-        WORKERS.clear();
+    }
+
+    /** Close one worker's service, ending its Python process and any task still running in it. */
+    private static void closeWorker(Worker w) {
+        try {
+            ApposeEnvironments.withExtensionClassLoader(() -> {
+                w.service.close();
+                return null;
+            });
+        } catch (Exception e) {
+            logger.warn("Error closing Appose Cellpose service: {}", e.getMessage(), e);
+        } finally {
+            LIVE_SERVICES.remove(w.service);
+        }
     }
 
     private synchronized void ensureService(CellposeSegmentationParams params) throws IOException {
@@ -300,7 +327,37 @@ public class ApposeBackend implements CellposeBackend {
         this.runScript = ApposeEnvironments.readResource(scriptName);
         this.initScript = ApposeEnvironments.readResource(initName);
 
+        this.envName = envName;
+        this.workerParams = params;
+
+        boolean reused;
+        synchronized (ApposeBackend.class) {
+            reused = WORKERS.containsKey(envName);
+        }
         this.worker = acquireWorker(envName, params);
+
+        // A worker idle since the last run can die on its first task -- before any Python runs --
+        // and Appose relaunches that task as a zombie we cannot see. Spend the death on a task with
+        // nothing at stake, rather than on a tile holding shared memory.
+        if (reused)
+            warmUpWorker();
+    }
+
+    /**
+     * Send a trivial task so that a stale worker fails here rather than on real work.
+     *
+     * <p>Best-effort: a warm-up that cannot be recovered is left for the real task to report.
+     */
+    private void warmUpWorker() {
+        synchronized (pythonLock()) {
+            try {
+                submit("task.update(message='Cellpose worker ready')", new HashMap<>(), "Worker warm-up");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (IOException e) {
+                logger.warn("Cellpose worker warm-up failed: {}", e.getMessage());
+            }
+        }
     }
 
     /** Reuse the worker for this environment if one is already running, otherwise start one. */
@@ -521,28 +578,66 @@ public class ApposeBackend implements CellposeBackend {
     }
 
     /**
-     * Submit one script to the worker, retrying the transient Appose "thread death" failure. Both
-     * scripts are idempotent, so a re-submit is safe; any other failure is surfaced immediately.
+     * Submit one script to the worker, recovering from the Appose "thread death" failure.
+     *
+     * <p>Retrying that failure on its own is not safe. When a worker dies before running any Python,
+     * Appose drops the task and relaunches it inside the same worker, where we can neither observe
+     * nor cancel it; a plain re-submit would then run the same work twice at once. So a retry
+     * happens only when no Python ran -- an UPDATE from the script is the observable gate -- and
+     * only after the worker has been replaced, which ends the relaunched task with its process.
+     * A failure after Python started is reported as-is.
      */
     private void submit(String script, Map<String, Object> inputs, String description) throws IOException, InterruptedException {
         IOException last = null;
         for (int attempt = 1; attempt <= THREAD_DEATH_ATTEMPTS; attempt++) {
+            AtomicBoolean pythonStarted = new AtomicBoolean();
             try {
-                submitOnce(script, inputs, description);
+                submitOnce(script, inputs, description, pythonStarted);
                 return;
             } catch (IOException e) {
                 if (!isThreadDeath(e))
                     throw e;
+                if (pythonStarted.get())
+                    throw new IOException(description + " failed after Python had started, so it was not"
+                            + " retried: the work may still be running in the Python worker", e);
+                if (recovering)
+                    throw e;
                 last = e;
                 if (attempt < THREAD_DEATH_ATTEMPTS) {
-                    logger.warn("{}: Appose reported worker thread death (attempt {} of {}); retrying",
-                            description, attempt, THREAD_DEATH_ATTEMPTS);
+                    logger.warn("{}: the Python worker died before running anything (attempt {} of {});"
+                            + " replacing it and retrying", description, attempt, THREAD_DEATH_ATTEMPTS);
                     Thread.sleep(THREAD_DEATH_RETRY_DELAY_MS * attempt);
+                    recoverWorker();
                 }
             }
         }
         throw new IOException(description + " failed after " + THREAD_DEATH_ATTEMPTS
-                + " attempts: Appose worker thread died each time", last);
+                + " attempts: the Python worker died each time", last);
+    }
+
+    /**
+     * Replace a dead worker and restore the state the new one needs.
+     *
+     * <p>Called while holding {@link #pythonLock()}, which is why that monitor belongs to the
+     * environment rather than to the worker being replaced.
+     */
+    private void recoverWorker() throws IOException, InterruptedException {
+        Worker dead = this.worker;
+        synchronized (ApposeBackend.class) {
+            if (WORKERS.get(envName) == dead)
+                WORKERS.remove(envName);
+        }
+        if (dead != null)
+            closeWorker(dead);
+        recovering = true;
+        try {
+            this.worker = acquireWorker(envName, workerParams);
+            // The replacement holds no model, and a tile submitted without one segments nothing.
+            if (workerParams != null)
+                initializeModel(workerParams);
+        } finally {
+            recovering = false;
+        }
     }
 
     /**
@@ -559,12 +654,19 @@ public class ApposeBackend implements CellposeBackend {
         return false;
     }
 
-    private void submitOnce(String script, Map<String, Object> inputs, String description) throws IOException, InterruptedException {
+    private void submitOnce(String script, Map<String, Object> inputs, String description,
+                           AtomicBoolean pythonStarted) throws IOException, InterruptedException {
         Task task;
         try {
             task = ApposeEnvironments.withExtensionClassLoader(() -> {
                 Task t = worker.service.task(script, inputs);
-                t.listen(ApposeBackend::relay);
+                t.listen(event -> {
+                    // Every vendored script reports progress as soon as its imports succeed, so an
+                    // UPDATE is the observable proof that Python ran.
+                    if (event.responseType == Service.ResponseType.UPDATE)
+                        pythonStarted.set(true);
+                    relay(event);
+                });
                 t.start();
                 return t;
             });
