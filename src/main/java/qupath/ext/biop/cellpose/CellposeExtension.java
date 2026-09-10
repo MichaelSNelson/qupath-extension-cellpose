@@ -186,9 +186,10 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
                         + "Python installation - standard (default): runs Cellpose from a Python "
                         + "installation you set up yourself, using the paths above, writing each "
                         + "image tile to a temporary file.\n\n"
-                        + "Appose - faster, no Python setup: runs Cellpose inside QuPath and builds "
-                        + "its own Python environment the first time it is used. Tiles stay in "
-                        + "memory and the Python process is reused between runs.\n\n"
+                        + "Appose - faster, installs its own Python: runs Cellpose inside QuPath and "
+                        + "builds its own Python environment the first time it is used, which is a "
+                        + "multi-GB download taking several minutes. After that, tiles stay in memory "
+                        + "and the Python process is reused between runs.\n\n"
                         + "Training and the QC notebook always use the Python installation, "
                         + "whichever is chosen here.")
                 .build();

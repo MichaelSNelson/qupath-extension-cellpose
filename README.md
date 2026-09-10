@@ -195,7 +195,7 @@ tiles.
 
 It is **off by default** and changes nothing about the existing subprocess workflow. To use it:
 
-1. `Edit > Preferences > Cellpose`: set **Cellpose processing type** to `Appose - faster, no Python setup` (optionally set
+1. `Edit > Preferences > Cellpose`: set **Cellpose processing type** to `Appose - faster, installs its own Python` (optionally set
    **Cellpose Appose device** to `AUTO`/`GPU`/`CPU`).
 2. Run the normal detection script. The **first run downloads a multi-GB environment** (watch
    `Extensions > Cellpose > Python console`); later runs reuse it.

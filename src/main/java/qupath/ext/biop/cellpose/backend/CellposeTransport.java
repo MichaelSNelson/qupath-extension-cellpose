@@ -26,7 +26,7 @@ public enum CellposeTransport {
     SUBPROCESS("Python installation - standard"),
 
     /** Run Cellpose in-process through Appose, exchanging images through shared memory. */
-    APPOSE("Appose - faster, no Python setup");
+    APPOSE("Appose - faster, installs its own Python");
 
     private final String label;
 
