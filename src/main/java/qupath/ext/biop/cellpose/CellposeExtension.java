@@ -180,9 +180,17 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
 
         PropertySheet.Item transportItem = new PropertyItemBuilder<>(cellposeTransport, CellposeTransport.class)
                 .propertyType(PropertyItemBuilder.PropertyType.GENERAL)
-                .name("Cellpose transport")
+                .name("Cellpose processing type")
                 .category("Cellpose/Omnipose")
-                .description("How to run Cellpose for detection:\nSUBPROCESS (default): launch an external Python process (uses the python.exe paths above).\nAPPOSE (experimental): run Cellpose in-process through Appose, building its own Python environment automatically.")
+                .description("How Cellpose runs when detecting objects.\n\n"
+                        + "Python installation - standard (default): runs Cellpose from a Python "
+                        + "installation you set up yourself, using the paths above, writing each "
+                        + "image tile to a temporary file.\n\n"
+                        + "Appose - faster, no Python setup: runs Cellpose inside QuPath and builds "
+                        + "its own Python environment the first time it is used. Tiles stay in "
+                        + "memory and the Python process is reused between runs.\n\n"
+                        + "Training and the QC notebook always use the Python installation, "
+                        + "whichever is chosen here.")
                 .build();
 
         PropertySheet.Item apposeEnvDirItem = new PropertyItemBuilder<>(cellposeApposeEnvDir, String.class)

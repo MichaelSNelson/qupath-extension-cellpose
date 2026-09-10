@@ -393,7 +393,7 @@ public class ApposeBackend implements CellposeBackend {
         // Windows. init() replaces rather than appends, so this is one combined string.
         String init = "import numpy\n" + parentWatcherSnippet() + cpUtils;
 
-        logger.info("Starting Appose Cellpose service (device={} -> environment {})", device, envName);
+        logger.info("Starting Appose Cellpose service (device={} -> environment {})", device.name(), envName);
         try {
             Service created = ApposeEnvironments.withExtensionClassLoader(() -> {
                 Service svc = ApposeEnvironments.getEnvironment().activate(envName).python();
@@ -408,7 +408,7 @@ public class ApposeBackend implements CellposeBackend {
                 return svc;
             });
             LIVE_SERVICES.add(created);
-            logger.info("Cellpose is running in the {} environment ({})", envName, device);
+            logger.info("Cellpose is running in the {} environment ({})", envName, device.name());
             Worker w = new Worker(created);
             WORKERS.put(envName, w);
             return w;

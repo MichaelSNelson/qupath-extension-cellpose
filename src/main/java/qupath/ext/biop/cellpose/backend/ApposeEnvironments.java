@@ -389,7 +389,7 @@ final class ApposeEnvironments {
 
             CellposeDevice device = gpuChoice.equals(answer) ? CellposeDevice.GPU : CellposeDevice.CPU;
             CellposeExtension.setDevicePreference(device);
-            logger.info("Cellpose Appose device set to {} for the first environment build", device);
+            logger.info("Cellpose Appose device set to {} for the first environment build", device.name());
             return device;
         }
     }

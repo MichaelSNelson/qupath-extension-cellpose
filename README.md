@@ -195,7 +195,7 @@ tiles.
 
 It is **off by default** and changes nothing about the existing subprocess workflow. To use it:
 
-1. `Edit > Preferences > Cellpose`: set **Cellpose transport** to `APPOSE` (optionally set
+1. `Edit > Preferences > Cellpose`: set **Cellpose processing type** to `Appose - faster, no Python setup` (optionally set
    **Cellpose Appose device** to `AUTO`/`GPU`/`CPU`).
 2. Run the normal detection script. The **first run downloads a multi-GB environment** (watch
    `Extensions > Cellpose > Python console`); later runs reuse it.
@@ -237,7 +237,7 @@ validation/QC labelling, and the QC metrics notebook always run through the conv
   model you must still configure a normal Cellpose Python interpreter under
   `Edit > Preferences > Cellpose`, exactly as before -- an Appose-only setup can detect but cannot
   train.
-- Selecting `APPOSE` cannot change training/QC behaviour. This isolation is locked by a regression
+- Selecting the Appose processing type cannot change training/QC behaviour. This isolation is locked by a regression
   test (`TrainingTransportIsolationTest`).
 
 ### Channels

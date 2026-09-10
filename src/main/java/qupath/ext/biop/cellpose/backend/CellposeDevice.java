@@ -24,11 +24,25 @@ package qupath.ext.biop.cellpose.backend;
 public enum CellposeDevice {
 
     /** Detect a usable GPU automatically (the default), falling back to CPU when none is found. */
-    AUTO,
+    AUTO("Auto - use a GPU if one is available"),
 
     /** Activate the CUDA sub-environment and request GPU execution regardless of detection. */
-    GPU,
+    GPU("GPU - always use the GPU"),
 
     /** Activate the CPU sub-environment and request CPU execution. */
-    CPU
+    CPU("CPU - never use the GPU");
+
+    private final String label;
+
+    CellposeDevice(String label) {
+        this.label = label;
+    }
+
+    /**
+     * @return the label shown in the preferences, rather than the constant name
+     */
+    @Override
+    public String toString() {
+        return label;
+    }
 }

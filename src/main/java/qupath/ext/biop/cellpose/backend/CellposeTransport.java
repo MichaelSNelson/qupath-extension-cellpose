@@ -23,8 +23,22 @@ public enum CellposeTransport {
      * Run Cellpose as an external Python process, exchanging images through temporary TIFF files.
      * This is the default.
      */
-    SUBPROCESS,
+    SUBPROCESS("Python installation - standard"),
 
     /** Run Cellpose in-process through Appose, exchanging images through shared memory. */
-    APPOSE
+    APPOSE("Appose - faster, no Python setup");
+
+    private final String label;
+
+    CellposeTransport(String label) {
+        this.label = label;
+    }
+
+    /**
+     * @return the label shown in the preferences, rather than the constant name
+     */
+    @Override
+    public String toString() {
+        return label;
+    }
 }
