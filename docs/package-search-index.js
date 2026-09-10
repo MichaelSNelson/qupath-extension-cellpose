@@ -1,1 +1,1 @@
-packageSearchIndex = [{"l":"All Packages","u":"allpackages-index.html","k":"18"},{"l":"qupath.ext.biop.cellpose"},{"l":"qupath.ext.biop.cellpose.backend"},{"l":"qupath.ext.biop.cellpose.ui"},{"l":"qupath.ext.biop.cmd"}];updateSearchResults();
+packageSearchIndex = [{"l":"All Packages","u":"allpackages-index.html","k":"18"},{"l":"qupath.ext.biop.cellpose"},{"l":"qupath.ext.biop.cmd"}];updateSearchResults();
