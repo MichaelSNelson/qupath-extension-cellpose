@@ -1,0 +1,48 @@
+name: Generate pixi lock (v6)
+
+# Scratch copy of regenerate-pixi-lock.yml that runs on push, because workflow_dispatch
+# only resolves workflows registered on the default branch. Lives only on tmp-lockgen.
+on:
+  push:
+    branches: [tmp-lockgen]
+
+permissions:
+  contents: read
+
+env:
+  PIXI_VERSION: v0.58.0
+  MANIFEST: src/main/resources/qupath/ext/biop/cellpose/appose/pixi.toml
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pixi version Appose bundles
+        run: |
+          set -euo pipefail
+          curl -fsSL -o pixi.tar.gz \
+            "https://github.com/prefix-dev/pixi/releases/download/${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl.tar.gz"
+          tar -xzf pixi.tar.gz
+          chmod +x pixi
+          ./pixi --version
+
+      - name: Resolve for every platform the manifest declares
+        run: |
+          set -euo pipefail
+          mkdir -p lockgen
+          cp "${MANIFEST}" lockgen/pixi.toml
+          ./pixi lock --manifest-path lockgen/pixi.toml
+
+      - name: Check the lock is format v6 and pins appose-python 0.12
+        run: |
+          set -euo pipefail
+          head -1 lockgen/pixi.lock
+          test "$(head -1 lockgen/pixi.lock)" = "version: 6"
+          grep -o 'appose-0\.[0-9]*\.[0-9]*-py3-none-any\.whl' lockgen/pixi.lock | sort -u
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pixi-lock
+          path: lockgen/pixi.lock
