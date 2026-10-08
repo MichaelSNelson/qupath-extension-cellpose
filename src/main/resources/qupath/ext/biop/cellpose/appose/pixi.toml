@@ -18,6 +18,9 @@ cmake = "*"
 llvmlite = "*"
 
 [pypi-dependencies]
+# 0.12 is the first appose-python without the worker race that fails a task with
+# "thread death" before its thread has started (apposed/appose#15). The Java side
+# being on 0.12 does not help a Python worker; this pin is what fixes it.
 appose = ">=0.12, <0.13"
 
 # --- PyTorch features ---

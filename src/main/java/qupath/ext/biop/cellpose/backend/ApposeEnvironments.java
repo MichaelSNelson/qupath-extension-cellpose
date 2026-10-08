@@ -155,10 +155,14 @@ final class ApposeEnvironments {
             logger.info("**  Extensions > Cellpose > Python console.");
             logger.info(bar);
         } else {
-            logger.info("Preparing the Cellpose Appose environment...");
+            logger.info("Preparing the Cellpose Appose environment at {}...", envDir);
         }
+        long buildStart = System.currentTimeMillis();
         try {
-            return runBuild(pixiToml);
+            Environment built = runBuild(pixiToml);
+            logger.info("The Cellpose Appose environment at {} is ready ({} ms)", envDir,
+                    System.currentTimeMillis() - buildStart);
+            return built;
         } catch (BuildException e) {
             String causes = collectCauseMessages(e);
             if (looksLikeWindowsFileLock(causes)) {

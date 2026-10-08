@@ -61,7 +61,7 @@ use_gpu, device = get_torch_device(use_gpu)
 task.update(
     current = 1,
     maximum= 2,
-    message=f"CP4: Start Cellpose (device={device}): deploy model {selected_model}"
+    message=f"CP4: Start Cellpose (device={describe_device(device)}; {runtime_versions()}): deploy model {selected_model}"
 )
 
 model = models.CellposeModel(

@@ -19,6 +19,7 @@ package qupath.ext.biop.cellpose.backend;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.process.ShortProcessor;
+import org.apposed.appose.Environment;
 import org.apposed.appose.NDArray;
 import org.apposed.appose.Service;
 import org.apposed.appose.Service.Task;
@@ -46,6 +47,7 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
@@ -65,6 +67,9 @@ public class ApposeBackend implements CellposeBackend {
     /** Attempts for the transient Appose worker "thread death" (see {@link #submit}). */
     private static final int THREAD_DEATH_ATTEMPTS = 3;
     private static final long THREAD_DEATH_RETRY_DELAY_MS = 500L;
+
+    /** Workers this backend has replaced after a death; reported with each run's timing summary. */
+    private final AtomicInteger workerReplacements = new AtomicInteger();
 
     /** Cellpose-SAM (Cellpose 4) accepts at most three channels. */
     private static final int CELLPOSE_SAM_MAX_CHANNELS = 3;
@@ -132,13 +137,17 @@ public class ApposeBackend implements CellposeBackend {
         // where the subprocess backend rejects it immediately.
         probeFirstTile(tiles.get(0));
 
+        long setupStart = System.currentTimeMillis();
         ensureService(params);
         initializeModel(params);
+        logger.info("Cellpose Python worker and model ready in {} ms", System.currentTimeMillis() - setupStart);
 
         int workers = Math.max(1, Math.min(
                 requestedThreads > 0 ? requestedThreads : ThreadTools.getParallelism(),
                 tiles.size()));
         logger.info("Segmenting {} tile(s) with {} worker(s)", tiles.size(), workers);
+        long segmentStart = System.currentTimeMillis();
+        int replacementsBefore = workerReplacements.get();
 
         // Bounded, so at most `workers` tiles hold pixels at once.
         ExecutorService pool = Executors.newFixedThreadPool(workers,
@@ -170,6 +179,11 @@ public class ApposeBackend implements CellposeBackend {
         } finally {
             pool.shutdownNow();
         }
+
+        // The numbers a slow run needs: per-tile cost, and how often the worker had to be rebuilt.
+        long elapsed = System.currentTimeMillis() - segmentStart;
+        logger.info("Segmented {} tile(s) in {} ms ({} ms per tile); the Python worker was replaced {} time(s) during this run",
+                tiles.size(), elapsed, elapsed / tiles.size(), workerReplacements.get() - replacementsBefore);
     }
 
     /** Load the model into the worker, unless it already holds the same one. */
@@ -186,8 +200,10 @@ public class ApposeBackend implements CellposeBackend {
             inputs.put("model_name", params.isCustomModel() ? null : params.getModel());
             // Clear first, so a failed load cannot leave the worker claiming a model it lacks.
             worker.loadedModel = null;
+            long loadStart = System.currentTimeMillis();
             submit(initScript, inputs, "Initializing Cellpose model");
             worker.loadedModel = signature;
+            logger.info("Loaded the Cellpose model {} in {} ms", params.getModel(), System.currentTimeMillis() - loadStart);
         }
     }
 
@@ -236,9 +252,12 @@ public class ApposeBackend implements CellposeBackend {
             input = allocate(() -> layout == null ? NDArrays.fromImagePlus(imp) : layout.pack(imp));
             labels = allocate(() -> NDArrays.allocateLabels(width, height));
             Map<String, Object> inputs = buildInputs(params, imp.getStackSize(), layout, input, labels);
+            long tileStart = System.currentTimeMillis();
             synchronized (pythonLock()) {
                 submit(runScript, inputs, "Segmenting tile " + tile.getImageFile().getName());
             }
+            logger.debug("Segmented tile {} ({}x{}, {} channel(s)) in {} ms", tile.getImageFile().getName(),
+                    width, height, imp.getStackSize(), System.currentTimeMillis() - tileStart);
             labelProcessor = NDArrays.labelsToShortProcessor(labels, width, height);
         } finally {
             closeQuietly(input);
@@ -394,9 +413,20 @@ public class ApposeBackend implements CellposeBackend {
         String init = "import numpy\n" + parentWatcherSnippet() + cpUtils;
 
         logger.info("Starting Appose Cellpose service (device={} -> environment {})", device.name(), envName);
+        long startedAt = System.currentTimeMillis();
         try {
             Service created = ApposeEnvironments.withExtensionClassLoader(() -> {
-                Service svc = ApposeEnvironments.getEnvironment().activate(envName).python();
+                Environment environment = ApposeEnvironments.getEnvironment();
+                // Appose activates a pixi sub-environment by running `pixi install --environment`,
+                // which checks the installed packages against the lock and then reports the
+                // environment as installed even when it changed nothing. Expected on every start.
+                logger.info("Verifying the {} environment against the lock (pixi install --environment {})",
+                        envName, envName);
+                long activateStart = System.currentTimeMillis();
+                Environment activated = environment.activate(envName);
+                logger.info("The {} environment was verified in {} ms", envName,
+                        System.currentTimeMillis() - activateStart);
+                Service svc = activated.python();
                 // stdout is the Appose IPC channel, so the debug callback is the only route by
                 // which Python diagnostics reach the user.
                 svc.debug(msg -> {
@@ -408,7 +438,8 @@ public class ApposeBackend implements CellposeBackend {
                 return svc;
             });
             LIVE_SERVICES.add(created);
-            logger.info("Cellpose is running in the {} environment ({})", envName, device.name());
+            logger.info("Cellpose is running in the {} environment ({}); the Python worker started in {} ms",
+                    envName, device.name(), System.currentTimeMillis() - startedAt);
             Worker w = new Worker(created);
             WORKERS.put(envName, w);
             return w;
@@ -602,9 +633,15 @@ public class ApposeBackend implements CellposeBackend {
             } catch (IOException e) {
                 if (!isThreadDeath(e))
                     throw e;
-                if (pythonStarted.get())
+                if (pythonStarted.get()) {
+                    logger.warn("{}: the Python worker reported 'thread death' after the script had started"
+                            + " (attempt {} of {}); not retried, because the task may still be running in the"
+                            + " worker. Check the appose version in the worker's start-up line: this failure"
+                            + " is spurious on appose-python older than 0.12.",
+                            description, attempt, THREAD_DEATH_ATTEMPTS);
                     throw new IOException(description + " failed after Python had started, so it was not"
                             + " retried: the work may still be running in the Python worker", e);
+                }
                 if (recovering)
                     throw e;
                 last = e;
@@ -612,7 +649,10 @@ public class ApposeBackend implements CellposeBackend {
                     logger.warn("{}: the Python worker died before running anything (attempt {} of {});"
                             + " replacing it and retrying", description, attempt, THREAD_DEATH_ATTEMPTS);
                     Thread.sleep(THREAD_DEATH_RETRY_DELAY_MS * attempt);
+                    long recoverStart = System.currentTimeMillis();
                     recoverWorker();
+                    logger.info("{}: replaced the Python worker in {} ms", description,
+                            System.currentTimeMillis() - recoverStart);
                 }
             }
         }
@@ -637,6 +677,7 @@ public class ApposeBackend implements CellposeBackend {
         recovering = true;
         try {
             this.worker = acquireWorker(envName, workerParams, workerDevice);
+            workerReplacements.incrementAndGet();
             // The replacement holds no model, and a tile submitted without one segments nothing.
             if (workerParams != null)
                 initializeModel(workerParams);
