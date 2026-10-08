@@ -7,7 +7,7 @@ on:
     branches: [tmp-lockgen]
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   PIXI_VERSION: v0.58.0
@@ -46,3 +46,15 @@ jobs:
         with:
           name: pixi-lock
           path: lockgen/pixi.lock
+
+      # Artifact downloads leave GitHub's domain, which the session generating this lock
+      # cannot reach; the branch itself can be fetched. Scratch branch only.
+      - name: Commit the lock to this scratch branch
+        run: |
+          set -euo pipefail
+          cp lockgen/pixi.lock "$(dirname "${MANIFEST}")/pixi.lock"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$(dirname "${MANIFEST}")/pixi.lock"
+          git commit -m "Scratch: regenerated pixi.lock (v6, pixi ${PIXI_VERSION})"
+          git push origin HEAD:tmp-lockgen
