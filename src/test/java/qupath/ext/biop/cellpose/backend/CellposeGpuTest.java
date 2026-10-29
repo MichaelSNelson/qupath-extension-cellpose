@@ -74,8 +74,8 @@ class CellposeGpuTest {
         assertEquals("PCI_BUS_ID", pinned.envVars().get("CUDA_DEVICE_ORDER"));
         assertTrue(CellposeGpu.pinned(base, java.util.Optional.empty()) == base);
 
-        // the worker never sees ~/.local site-packages, and the pinning above survives
-        Environment isolated = ApposeEnvironments.isolateFromUserSite(pinned);
+        // the worker's own variables are added without losing the pinning above
+        Environment isolated = new CellposeGpu.PinnedEnvironment(pinned, Map.of("PYTHONNOUSERSITE", "1"));
         assertEquals("1", isolated.envVars().get("PYTHONNOUSERSITE"));
         assertEquals("GPU-bbbb", isolated.envVars().get("CUDA_VISIBLE_DEVICES"));
         assertEquals("cp3-cu130", isolated.envVars().get("PIXI_ENVIRONMENT_NAME"));

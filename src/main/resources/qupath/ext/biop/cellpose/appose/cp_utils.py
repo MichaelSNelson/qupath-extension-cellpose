@@ -37,6 +37,40 @@ from cellpose import models
 
 import torch
 
+
+def _explain_blocked_downloads():
+    """Make a refused model download say which file to fetch and where to put it.
+
+    Cellpose downloads a pretrained model the first time it is used (huggingface.co for
+    Cellpose-SAM, www.cellpose.org for the older models). Cluster nodes and institutional networks
+    often block those sites, and cellpose then fails with a bare urllib error such as
+    "HTTP Error 403: Forbidden". Cellpose 3 and 4 both fetch every model file, size models included,
+    through ``models.cache_model_path(basename)``, so wrapping it names the exact URL and target.
+    """
+    import http.client
+    import urllib.error
+
+    fetch = models.cache_model_path
+    network_errors = (urllib.error.URLError, http.client.HTTPException, ConnectionError, TimeoutError)
+
+    def cache_model_path(basename):
+        try:
+            return fetch(basename)
+        except network_errors as e:
+            url = models._MODEL_URL.rstrip("/") + "/" + basename
+            target = models.MODEL_DIR.joinpath(basename)
+            raise RuntimeError(
+                f"Cellpose could not download its model file '{basename}' from {url} ({e}). "
+                f"If this network blocks that site, download {url} on a computer with internet access "
+                f"and copy it to {target} (exactly that name, no extension). To keep models in another "
+                f"folder, for example one shared copy for a lab, set CELLPOSE_LOCAL_MODELS_PATH to that "
+                f"folder before starting QuPath.") from e
+
+    models.cache_model_path = cache_model_path
+
+
+_explain_blocked_downloads()
+
 def get_torch_device(use_gpu: bool) -> tuple[bool, torch.device]:
     """Check torch device availability and returns a tupple (use_gpu: bool, device: torch.device) using the best available backend: CUDA > MPS > CPU."""
     if not use_gpu:

@@ -490,9 +490,19 @@ final class ApposeEnvironments {
         }
         String capability = computeCapability();
         String build = cudaBuildFor(capability);
+        String driver = build == null ? null : runQuietly(List.of(nvidiaSmi, "--query-gpu=driver_version",
+                "--format=csv,noheader"));
+        driver = driver == null || driver.isBlank() ? null : driver.strip().lines().findFirst().orElse(null);
         if (build == null) {
             logger.warn("The GPU reports compute capability {}, which none of the bundled CUDA builds support; "
                     + "using the CPU environment. The CUDA builds cover 5.0 and above.", capability);
+        } else if (!driverRuns(build, driver)) {
+            // PyTorch would load, find no usable GPU and run on the CPU without saying why.
+            logger.warn("This GPU (compute capability {}) needs the {} build of PyTorch, which needs NVIDIA driver {} "
+                            + "or newer; this machine has driver {}. Using the CPU environment. Update the driver, or on "
+                            + "a cluster use a node with a newer one.",
+                    capability, build, MIN_DRIVER.get(build), driver);
+            return null;
         } else {
             logger.info("NVIDIA GPU compute capability {} -> {} environment",
                     capability == null ? "unknown" : capability, build);
@@ -514,6 +524,30 @@ final class ApposeEnvironments {
      */
     static boolean requestGpu(CellposeDevice device) {
         return device != CellposeDevice.CPU;
+    }
+
+    /**
+     * Oldest NVIDIA driver (major version) each CUDA build runs on: CUDA 12.x needs 525 or newer
+     * (minor-version compatibility), CUDA 13.0 needs 580.
+     */
+    static final java.util.Map<String, Integer> MIN_DRIVER = java.util.Map.of("cu126", 525, "cu130", 580);
+
+    /**
+     * Whether the installed driver can run a CUDA build.
+     *
+     * @param build         {@code cu126} or {@code cu130}
+     * @param driverVersion as nvidia-smi reports it, e.g. {@code 570.133.20}, or null if unknown
+     * @return false only when the driver is known to be too old
+     */
+    static boolean driverRuns(String build, String driverVersion) {
+        Integer needed = MIN_DRIVER.get(build);
+        if (needed == null || driverVersion == null)
+            return true;
+        try {
+            return Integer.parseInt(driverVersion.strip().split("\\.")[0]) >= needed;
+        } catch (NumberFormatException e) {
+            return true;
+        }
     }
 
     /**
@@ -695,13 +729,67 @@ final class ApposeEnvironments {
     }
 
     /**
-     * {@code environment} with its workers kept out of the user's own site-packages
-     * ({@code ~/.local/lib/pythonX.Y/site-packages}). Python puts that directory ahead of the
-     * environment's, so a {@code pip install --user} of opencv, numpy or torch would otherwise
-     * replace the locked versions inside the worker.
+     * {@code environment} with its worker shielded from Python and native libraries that QuPath's
+     * own environment points at, so the worker runs what the lock installed.
+     *
+     * @param environment the activated sub-environment
+     * @param envName     its name, e.g. {@code cp4-cu126}
      */
-    static Environment isolateFromUserSite(Environment environment) {
-        return new CellposeGpu.PinnedEnvironment(environment, java.util.Map.of("PYTHONNOUSERSITE", "1"));
+    static Environment isolateWorker(Environment environment, String envName) {
+        Path prefix = getEnvironmentPath().resolve(".pixi").resolve("envs").resolve(envName);
+        boolean linux = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("linux");
+        java.util.Map<String, String> vars = workerVariables(System.getenv(), prefix, linux,
+                dir -> Files.exists(Path.of(dir, "libcuda.so.1")));
+        return new CellposeGpu.PinnedEnvironment(environment, vars);
+    }
+
+    /**
+     * The variables {@link #isolateWorker} sets.
+     * <ul>
+     *   <li>{@code PYTHONNOUSERSITE=1}: Python puts {@code ~/.local/lib/pythonX.Y/site-packages}
+     *       ahead of the environment's own, so a {@code pip install --user} of opencv, numpy or
+     *       torch would replace the locked version inside the worker.</li>
+     *   <li>{@code PYTHONPATH} and {@code PYTHONHOME} emptied (Python treats empty as unset) when
+     *       QuPath was started with them.</li>
+     *   <li>Linux: {@code LD_LIBRARY_PATH} becomes the environment's {@code lib} folder, followed by
+     *       only those inherited folders that hold the NVIDIA driver ({@code libcuda.so.1}; under
+     *       Apptainer {@code --nv} that is {@code /.singularity.d/libs}). Launch scripts for QuPath
+     *       often add another Python environment's {@code torch/lib} and cuDNN for DJL, and its
+     *       libraries then win over the worker's. The environment's {@code lib} comes first so its
+     *       libstdc++ is the one loaded: inside an older container, the system copy lacks the
+     *       {@code CXXABI} versions that conda-forge packages such as llvmlite need.</li>
+     * </ul>
+     */
+    static java.util.Map<String, String> workerVariables(java.util.Map<String, String> inherited, Path envPrefix,
+                                                         boolean linux, java.util.function.Predicate<String> isDriverDir) {
+        java.util.Map<String, String> vars = new java.util.LinkedHashMap<>();
+        vars.put("PYTHONNOUSERSITE", "1");
+        for (String name : List.of("PYTHONPATH", "PYTHONHOME")) {
+            String value = inherited.get(name);
+            if (value != null && !value.isBlank()) {
+                logger.info("Not passing {}={} to the Cellpose worker", name, value);
+                vars.put(name, "");
+            }
+        }
+        if (linux) {
+            List<String> kept = new java.util.ArrayList<>();
+            kept.add(envPrefix.resolve("lib").toString());
+            List<String> dropped = new java.util.ArrayList<>();
+            String current = inherited.getOrDefault("LD_LIBRARY_PATH", "");
+            for (String dir : current.split(File.pathSeparator)) {
+                if (dir.isBlank() || kept.contains(dir))
+                    continue;
+                if (isDriverDir.test(dir))
+                    kept.add(dir);
+                else
+                    dropped.add(dir);
+            }
+            if (!dropped.isEmpty())
+                logger.info("Not passing these LD_LIBRARY_PATH folders to the Cellpose worker (no NVIDIA driver in them): {}",
+                        dropped);
+            vars.put("LD_LIBRARY_PATH", String.join(File.pathSeparator, kept));
+        }
+        return vars;
     }
 
     /**
