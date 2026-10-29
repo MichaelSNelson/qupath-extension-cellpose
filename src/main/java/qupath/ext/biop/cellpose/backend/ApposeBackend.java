@@ -482,7 +482,13 @@ public class ApposeBackend implements CellposeBackend {
                 logger.info("Verifying the {} environment against the lock (pixi install --environment {})",
                         envName, envName);
                 long activateStart = System.nanoTime();
-                Environment activated = environment.activate(envName);
+                Environment activated;
+                // The first activation of a sub-environment is the multi-GB download; watch it.
+                try (PixiWatch watch = new PixiWatch(ApposeEnvironments.getEnvironmentPath(),
+                        "Installing the " + envName + " environment")) {
+                    activated = environment.activate(envName);
+                    watch.succeeded();
+                }
                 logger.info("The {} environment was verified in {} ms", envName,
                         elapsedMs(activateStart));
                 Service svc = ApposeEnvironments.pinToSelectedGpu(activated).python();

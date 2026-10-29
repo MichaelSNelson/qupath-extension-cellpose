@@ -195,8 +195,8 @@ final class ApposeEnvironments {
     }
 
     private static Environment runBuild(String pixiToml) throws BuildException {
-        try {
-            return withExtensionClassLoader(() -> Appose.pixi()
+        try (PixiWatch watch = new PixiWatch(getEnvironmentPath(), "Preparing the Cellpose environment")) {
+            Environment built = withExtensionClassLoader(() -> Appose.pixi()
                     .content(pixiToml)
                     // base() sets the environment directory itself; it does not compose with
                     // name(), so this takes the full path and name() must not also be set.
@@ -206,20 +206,38 @@ final class ApposeEnvironments {
                         logger.info(line);
                         PythonConsoleWindow.appendMessage(line);
                     })
-                    .subscribeOutput(line -> {
-                        logger.info("[pixi] {}", line);
-                        PythonConsoleWindow.appendMessage("[pixi] " + line);
-                    })
-                    .subscribeError(line -> {
-                        logger.warn("[pixi] {}", line);
-                        PythonConsoleWindow.appendMessage("[pixi] " + line);
-                    })
+                    .subscribeOutput(ApposeEnvironments::relayPixiLine)
+                    .subscribeError(ApposeEnvironments::relayPixiLine)
                     .build());
+            watch.succeeded();
+            return built;
         } catch (BuildException e) {
             throw e;
         } catch (Exception e) {
             throw new BuildException("Unexpected error building the Cellpose Appose environment", e);
         }
+    }
+
+    /**
+     * Log one line of pixi output at the level pixi gave it. pixi writes everything, its debug
+     * output included, to stderr, so logging stderr at WARN made a healthy build look like a
+     * failing one. Debug lines stay out of the Python console.
+     *
+     * @param line the line pixi printed
+     */
+    static void relayPixiLine(String line) {
+        String level = PixiWatch.levelOf(line);
+        if ("TRACE".equals(level) || "DEBUG".equals(level)) {
+            logger.debug("[pixi] {}", line);
+            return;
+        }
+        if ("WARN".equals(level))
+            logger.warn("[pixi] {}", line);
+        else if ("ERROR".equals(level))
+            logger.error("[pixi] {}", line);
+        else
+            logger.info("[pixi] {}", line);
+        PythonConsoleWindow.appendMessage("[pixi] " + line);
     }
 
     /**
