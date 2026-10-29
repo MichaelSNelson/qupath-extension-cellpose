@@ -478,9 +478,15 @@ public class ApposeBackend implements CellposeBackend {
                 Environment environment = ApposeEnvironments.getEnvironment();
                 // Appose activates a pixi sub-environment by running `pixi install --environment`,
                 // which checks the installed packages against the lock and then reports the
-                // environment as installed even when it changed nothing. Expected on every start.
-                logger.info("Verifying the {} environment against the lock (pixi install --environment {})",
-                        envName, envName);
+                // environment as installed even when it changed nothing. Expected on every start;
+                // only the first one downloads and installs PyTorch.
+                boolean firstInstall = !ApposeEnvironments.isInstalled(envName);
+                if (firstInstall)
+                    logger.info("Installing the {} environment (first use: downloads PyTorch and Cellpose, "
+                            + "several GB; on a network filesystem this can take a long time)", envName);
+                else
+                    logger.info("Verifying the {} environment against the lock (pixi install --environment {})",
+                            envName, envName);
                 long activateStart = System.nanoTime();
                 Environment activated;
                 // The first activation of a sub-environment is the multi-GB download; watch it.
@@ -489,8 +495,8 @@ public class ApposeBackend implements CellposeBackend {
                     activated = environment.activate(envName);
                     watch.succeeded();
                 }
-                logger.info("The {} environment was verified in {} ms", envName,
-                        elapsedMs(activateStart));
+                logger.info("The {} environment was {} in {} ms", envName,
+                        firstInstall ? "installed" : "verified", elapsedMs(activateStart));
                 Service svc = ApposeEnvironments.pinToSelectedGpu(activated).python();
                 // stdout is the Appose IPC channel, so the debug callback is the only route by
                 // which Python diagnostics reach the user.

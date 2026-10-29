@@ -90,6 +90,16 @@ numpy = "<2"
 [feature.cp4.pypi-dependencies]
 cellpose = ">=4, <5"
 
+# opencv-python-headless 4.13 and later bundle Red Hat 8's FIPS build of OpenSSL 1.1.1k (through
+# FFmpeg) without the checksum file its self-test reads, so `import cv2` aborts with "FATAL FIPS
+# SELFTEST FAILURE" on any Linux host in FIPS mode, as many institutional clusters are
+# (opencv/opencv-python#1191). 4.12.0.88 bundles a plain OpenSSL 1.1.1w. Linux only: the other
+# platforms' wheels are not built on Red Hat.
+[feature.cp3.target.linux-64.pypi-dependencies]
+opencv-python-headless = ">=4.10, <4.13"
+[feature.cp4.target.linux-64.pypi-dependencies]
+opencv-python-headless = ">=4.10, <4.13"
+
 
 # --- Environments ---
 [environments]
