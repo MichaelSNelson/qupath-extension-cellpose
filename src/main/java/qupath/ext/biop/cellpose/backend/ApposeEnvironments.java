@@ -695,6 +695,16 @@ final class ApposeEnvironments {
     }
 
     /**
+     * {@code environment} with its workers kept out of the user's own site-packages
+     * ({@code ~/.local/lib/pythonX.Y/site-packages}). Python puts that directory ahead of the
+     * environment's, so a {@code pip install --user} of opencv, numpy or torch would otherwise
+     * replace the locked versions inside the worker.
+     */
+    static Environment isolateFromUserSite(Environment environment) {
+        return new CellposeGpu.PinnedEnvironment(environment, java.util.Map.of("PYTHONNOUSERSITE", "1"));
+    }
+
+    /**
      * {@code environment} with its workers pinned to the selected card. Logs the cards and the
      * choice so a multi-GPU report shows which card was used.
      */

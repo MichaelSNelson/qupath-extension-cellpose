@@ -497,7 +497,8 @@ public class ApposeBackend implements CellposeBackend {
                 }
                 logger.info("The {} environment was {} in {} ms", envName,
                         firstInstall ? "installed" : "verified", elapsedMs(activateStart));
-                Service svc = ApposeEnvironments.pinToSelectedGpu(activated).python();
+                Service svc = ApposeEnvironments.isolateFromUserSite(
+                        ApposeEnvironments.pinToSelectedGpu(activated)).python();
                 // stdout is the Appose IPC channel, so the debug callback is the only route by
                 // which Python diagnostics reach the user.
                 svc.debug(msg -> {
