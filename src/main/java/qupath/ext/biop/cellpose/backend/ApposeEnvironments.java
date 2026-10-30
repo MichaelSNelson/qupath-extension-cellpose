@@ -29,7 +29,11 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import javafx.scene.control.ButtonType;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -75,6 +79,9 @@ final class ApposeEnvironments {
     private static volatile boolean firstRunWarned = false;
 
     private ApposeEnvironments() {}
+
+    /** Name prefix of an environment moved aside to be deleted. */
+    private static final String RETIRED_PREFIX = ".pixi-old-";
 
     /**
      * Build (once) and return the shared Appose environment from the vendored pixi manifest.
@@ -252,7 +259,7 @@ final class ApposeEnvironments {
      * @param expectedToml the bundled manifest content
      * @param expectedLock the bundled lock content
      */
-    private static void syncManifest(Path envDir, String expectedToml, String expectedLock) throws IOException {
+    static void syncManifest(Path envDir, String expectedToml, String expectedLock) throws IOException {
         Path tomlFile = envDir.resolve("pixi.toml");
         Path lockFile = envDir.resolve("pixi.lock");
 
@@ -262,10 +269,11 @@ final class ApposeEnvironments {
         boolean changed = !Files.exists(tomlFile)
                 || !normalize(Files.readString(tomlFile, StandardCharsets.UTF_8)).equals(normalize(expectedToml));
         if (changed && Files.exists(tomlFile))
-            deletePixiDir(envDir.resolve(".pixi"));
+            retirePixiDir(envDir.resolve(".pixi"));
 
         Files.writeString(tomlFile, expectedToml, StandardCharsets.UTF_8);
         Files.writeString(lockFile, expectedLock, StandardCharsets.UTF_8);
+        deleteRetiredEnvironments(envDir);
     }
 
     /**
@@ -299,42 +307,97 @@ final class ApposeEnvironments {
     }
 
     /**
-     * Best-effort recursive delete of the {@code .pixi} directory, falling back to rename-then-delete
-     * when a locked file blocks it on Windows.
+     * Move the {@code .pixi} directory aside so a new environment can be built at once; the copy
+     * is deleted in the background by {@link #deleteRetiredEnvironments(Path)}. An environment is
+     * tens of thousands of small files, and deleting them first took a run on a CephFS home
+     * directory many minutes of silence with no CPU in use, where a rename takes no time. Where the
+     * rename fails (a locked file on Windows) it is deleted in place.
      */
-    private static void deletePixiDir(Path pixiDir) throws IOException {
+    private static void retirePixiDir(Path pixiDir) throws IOException {
         if (!Files.exists(pixiDir))
             return;
+        logger.info("The bundled Cellpose environment definition changed; replacing the environment in {}", pixiDir);
+        PythonConsoleWindow.showForRun();
         try {
-            deleteRecursively(pixiDir);
+            Files.move(pixiDir, pixiDir.resolveSibling(RETIRED_PREFIX + System.currentTimeMillis()));
         } catch (IOException e) {
-            Path renamed = pixiDir.resolveSibling(".pixi-old-" + System.currentTimeMillis());
+            logger.debug("Could not move {} aside ({}); deleting it in place", pixiDir, e.getMessage());
             try {
-                Files.move(pixiDir, renamed);
-                deleteRecursively(renamed);
+                deleteRecursively(pixiDir);
             } catch (IOException e2) {
                 throw new IOException("Could not remove the existing Cellpose environment at " + pixiDir, e2);
             }
         }
     }
 
-    private static void deleteRecursively(Path path) throws IOException {
-        if (!Files.exists(path))
-            return;
-        try (var walk = Files.walk(path)) {
-            walk.sorted((a, b) -> b.getNameCount() - a.getNameCount())
-                    .forEach(p -> {
-                        try {
-                            Files.deleteIfExists(p);
-                        } catch (IOException e) {
-                            throw new RuntimeException(e);
-                        }
-                    });
-        } catch (RuntimeException e) {
-            if (e.getCause() instanceof IOException io)
-                throw io;
-            throw e;
+    /**
+     * Delete any retired environments in {@code envDir} on a background thread, reporting progress.
+     * Ones left by a QuPath that exited part way through are picked up by the next run. Failure only
+     * leaves files behind, so it is logged and does not stop the run.
+     *
+     * @return the thread doing it, or null if there is nothing to delete
+     */
+    static Thread deleteRetiredEnvironments(Path envDir) {
+        List<Path> retired;
+        try (var children = Files.list(envDir)) {
+            retired = children.filter(p -> p.getFileName().toString().startsWith(RETIRED_PREFIX)).toList();
+        } catch (IOException e) {
+            logger.debug("Could not look for retired environments in {}: {}", envDir, e.getMessage());
+            return null;
         }
+        if (retired.isEmpty())
+            return null;
+        Thread t = new Thread(() -> {
+            for (Path old : retired) {
+                long start = System.nanoTime();
+                relay("Removing the previous Cellpose environment in the background: " + old);
+                try {
+                    long files = deleteRecursively(old);
+                    relay("Removed the previous Cellpose environment (" + files + " files, "
+                            + elapsedMs(start) / 1000 + " s)");
+                } catch (IOException | RuntimeException e) {
+                    logger.warn("Could not remove the previous Cellpose environment at {}: {}. It is safe to "
+                            + "delete it yourself.", old, e.getMessage());
+                }
+            }
+        }, "Cellpose-old-environment-delete");
+        t.setDaemon(true);
+        t.start();
+        return t;
+    }
+
+    private static void relay(String line) {
+        logger.info(line);
+        PythonConsoleWindow.appendMessage(line);
+    }
+
+    /** Depth-first, so nothing is held in memory and progress can be reported as it goes. */
+    private static long deleteRecursively(Path path) throws IOException {
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS))
+            return 0;
+        long[] files = {0};
+        long[] lastReport = {System.nanoTime()};
+        Files.walkFileTree(path, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                Files.deleteIfExists(file);
+                files[0]++;
+                if (System.nanoTime() - lastReport[0] > TimeUnit.SECONDS.toNanos(PixiWatch.HEARTBEAT_SECONDS)) {
+                    lastReport[0] = System.nanoTime();
+                    relay("Removing the previous Cellpose environment: " + files[0] + " files so far");
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException e) throws IOException {
+                if (e != null)
+                    throw e;
+                Files.deleteIfExists(dir);
+                return FileVisitResult.CONTINUE;
+            }
+        });
+        return files[0];
     }
 
     /**
