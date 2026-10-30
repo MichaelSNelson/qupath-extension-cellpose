@@ -206,8 +206,13 @@ It is **off by default** and changes nothing about the existing subprocess workf
 
 1. `Edit > Preferences > Cellpose`: set **Cellpose processing type** to `Appose - runs faster, self-setup` (optionally set
    **Cellpose Appose device** to `AUTO`/`GPU`/`CPU`).
-2. Run the normal detection script. The **first run downloads a multi-GB environment** (watch
-   `Extensions > Cellpose > Python console`); later runs reuse it.
+2. Run the normal detection script. The **first run downloads a multi-GB environment**, and
+   `Extensions > Cellpose > Python console` opens by itself to show it; later runs reuse it.
+
+**Python console during a run.** QuPath ignores clicks on its main window while a script runs, so
+the menu item cannot be reached once a detection has started. A console that is already open keeps
+working, so open it first, or tick **Cellpose Appose: open the Python console during runs** to have
+it open by itself. It shows Cellpose's own log output on either processing type.
 
 Scripts can also select it directly with `CellposeBuilder.useAppose()`, which overrides the
 preference for that run.

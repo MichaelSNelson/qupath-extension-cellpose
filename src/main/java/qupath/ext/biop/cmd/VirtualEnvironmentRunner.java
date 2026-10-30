@@ -3,6 +3,7 @@ package qupath.ext.biop.cmd;
 import org.controlsfx.tools.Platform;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.biop.cellpose.ui.PythonConsoleWindow;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -213,6 +214,7 @@ public class VirtualEnvironmentRunner {
                     for (String line = stdIn.readLine(); line != null; ) {
                         logger.info("{}: {}", name, line);
                         logResults.add(line);
+                        PythonConsoleWindow.appendMessage(line);
                         line = stdIn.readLine();
                     }
                 } catch (IOException e) {

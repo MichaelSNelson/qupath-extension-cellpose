@@ -195,6 +195,9 @@ final class ApposeEnvironments {
     }
 
     private static Environment runBuild(String pixiToml) throws BuildException {
+        // This also runs once a session on an environment that needs nothing, taking under a second.
+        if (!isInstalled("default"))
+            PythonConsoleWindow.showForRun();
         try (PixiWatch watch = new PixiWatch(getEnvironmentPath(), "Preparing the Cellpose environment")) {
             Environment built = withExtensionClassLoader(() -> Appose.pixi()
                     .content(pixiToml)

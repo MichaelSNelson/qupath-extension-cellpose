@@ -28,8 +28,8 @@ import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.lib.gui.QuPathGUI;
 
-import java.awt.GraphicsEnvironment;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -172,13 +172,38 @@ public final class PythonConsoleWindow {
      */
     public static void show() {
         if (!isFxAvailable()) {
-            logger.warn("Cannot show the Cellpose Python console: no graphics environment available");
+            logger.warn("Cannot show the Cellpose Python console: QuPath has no window here");
             return;
         }
         try {
             Platform.runLater(PythonConsoleWindow::showOnFx);
         } catch (IllegalStateException e) {
             logger.warn("Cannot show the Cellpose Python console: JavaFX is not running");
+        }
+    }
+
+    /**
+     * Open the console for a run that has started, without pulling it in front of what the user is
+     * doing. QuPath ignores mouse clicks on its main window while a script runs, and Cellpose runs
+     * from a script, so the menu item cannot open the console mid-run; this window is separate and
+     * stays usable. Does nothing when it is already open, or when QuPath has no window.
+     */
+    public static void showForRun() {
+        if (!isFxAvailable())
+            return;
+        try {
+            Platform.runLater(() -> {
+                PythonConsoleWindow window = instance;
+                if (window == null) {
+                    window = new PythonConsoleWindow();
+                    instance = window;
+                }
+                flush();
+                if (!window.stage.isShowing())
+                    window.stage.show();
+            });
+        } catch (IllegalStateException e) {
+            logger.debug("Cannot show the Cellpose Python console: JavaFX is not running");
         }
     }
 
@@ -211,7 +236,11 @@ public final class PythonConsoleWindow {
         }
     }
 
+    /**
+     * Whether QuPath has a window. Not {@code GraphicsEnvironment.isHeadless()}: that describes AWT,
+     * which can report headless (java.awt.headless=true in a container) while JavaFX runs normally.
+     */
     private static boolean isFxAvailable() {
-        return !GraphicsEnvironment.isHeadless();
+        return QuPathGUI.getInstance() != null;
     }
 }

@@ -121,6 +121,16 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
 
     private static final AtomicBoolean workerStarting = new AtomicBoolean(false);
 
+    private static final BooleanProperty cellposeApposeShowConsole =
+            PathPrefs.createPersistentPreference("cellposeApposeShowConsole", false);
+
+    /**
+     * @return whether the Python console should open by itself when an Appose run starts
+     */
+    public static boolean showConsoleDuringRuns() {
+        return cellposeApposeShowConsole.get();
+    }
+
     /**
      * Start the Appose Python worker in the background, if the transport is Appose and the
      * preference asks for it. At most one start at a time.
@@ -290,18 +300,32 @@ public class CellposeExtension implements QuPathExtension, GitHubProject {
                         + "detection, it does nothing. Turning it on starts the worker straight away.")
                 .build();
 
+        PropertySheet.Item showConsoleItem = new PropertyItemBuilder<>(cellposeApposeShowConsole, Boolean.class)
+                .propertyType(PropertyItemBuilder.PropertyType.GENERAL)
+                .name("Cellpose Appose: open the Python console during runs")
+                .category("Cellpose/Omnipose")
+                .description("Open the Python console by itself when a detection starts.\n"
+                        + "QuPath ignores clicks on its main window while a script runs, so Extensions > "
+                        + "Cellpose > Python console cannot be reached once a run has started; a console "
+                        + "that is already open keeps working.\n"
+                        + "Off (default): open it from the menu before running. It always opens by itself "
+                        + "while an environment is being built, however this is set.")
+                .build();
+
         // Add Permanent Preferences and Populate Preferences
         var items = QuPathGUI.getInstance().getPreferencePane().getPropertySheet().getItems();
         items.addAll(cellposePathItem, cellposeSAMPathItem, omniposePathItem, condaPathItem, transportItem, deviceItem, gpuItem, apposeEnvDirItem);
 
-        // The start-up option means nothing for the subprocess transport, so it is only listed
-        // while Appose is selected, directly under the processing type.
+        // These options mean nothing for the subprocess transport, so they are only listed while
+        // Appose is selected, directly under the processing type.
         Runnable showStartOption = () -> {
             boolean wanted = cellposeTransport.get() == CellposeTransport.APPOSE;
-            if (wanted && !items.contains(startWithQuPathItem))
-                items.add(Math.min(items.indexOf(transportItem) + 1, items.size()), startWithQuPathItem);
-            else if (!wanted)
-                items.remove(startWithQuPathItem);
+            for (PropertySheet.Item item : List.of(showConsoleItem, startWithQuPathItem)) {
+                if (wanted && !items.contains(item))
+                    items.add(Math.min(items.indexOf(transportItem) + 1, items.size()), item);
+                else if (!wanted)
+                    items.remove(item);
+            }
         };
         showStartOption.run();
         cellposeTransport.addListener((obs, old, now) -> {

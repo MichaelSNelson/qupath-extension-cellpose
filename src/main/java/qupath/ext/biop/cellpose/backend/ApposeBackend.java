@@ -32,6 +32,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import qupath.lib.common.ThreadTools;
 import qupath.ext.biop.cellpose.TileFile;
+import qupath.ext.biop.cellpose.CellposeExtension;
 import qupath.ext.biop.cellpose.ui.PythonConsoleWindow;
 
 import java.io.IOException;
@@ -92,6 +93,9 @@ public class ApposeBackend implements CellposeBackend {
      * <p>Scoped to the environment, not to the {@link Worker}, so that replacing a dead worker does
      * not swap the monitor out from under a caller that is holding it.
      */
+    /** Longest worker line passed on to the log and the console. */
+    private static final int MAX_PYTHON_LINE = 2000;
+
     private Object pythonLock() {
         return pythonLockFor(envName);
     }
@@ -138,6 +142,9 @@ public class ApposeBackend implements CellposeBackend {
         // path, so without this a bad channel name surfaces only after several minutes of setup,
         // where the subprocess backend rejects it immediately.
         probeFirstTile(tiles.get(0));
+
+        if (CellposeExtension.showConsoleDuringRuns())
+            PythonConsoleWindow.showForRun();
 
         long setupStart = System.nanoTime();
         ensureService(params);
@@ -481,10 +488,11 @@ public class ApposeBackend implements CellposeBackend {
                 // environment as installed even when it changed nothing. Expected on every start;
                 // only the first one downloads and installs PyTorch.
                 boolean firstInstall = !ApposeEnvironments.isInstalled(envName);
-                if (firstInstall)
+                if (firstInstall) {
                     logger.info("Installing the {} environment (first use: downloads PyTorch and Cellpose, "
                             + "several GB; on a network filesystem this can take a long time)", envName);
-                else
+                    PythonConsoleWindow.showForRun();
+                } else
                     logger.info("Verifying the {} environment against the lock (pixi install --environment {})",
                             envName, envName);
                 long activateStart = System.nanoTime();
@@ -502,9 +510,14 @@ public class ApposeBackend implements CellposeBackend {
                 // stdout is the Appose IPC channel, so the debug callback is the only route by
                 // which Python diagnostics reach the user.
                 svc.debug(msg -> {
-                    logger.debug("[Cellpose Python] {}", msg);
-                    if (isConsoleWorthy(msg))
-                        PythonConsoleWindow.appendMessage(msg);
+                    if (!isConsoleWorthy(msg)) {
+                        logger.debug("[Cellpose Python] {}", msg);
+                        return;
+                    }
+                    String line = msg.length() > MAX_PYTHON_LINE
+                            ? msg.substring(0, MAX_PYTHON_LINE) + "... [truncated]" : msg;
+                    logger.info("[Cellpose Python] {}", line);
+                    PythonConsoleWindow.appendMessage(line);
                 });
                 svc.init(init);
                 return svc;

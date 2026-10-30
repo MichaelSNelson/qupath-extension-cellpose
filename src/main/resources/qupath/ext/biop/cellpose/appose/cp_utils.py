@@ -31,6 +31,17 @@
 # #L%
 ###
 
+import logging
+import sys
+
+# stderr reaches the Python console and the QuPath log; stdout is the Appose protocol. Without this
+# cellpose's own log lines are dropped. Before the cellpose import, which logs too.
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
 # These imports are required for Appose calls to work on Windows platforms.
 import numpy as np
 from cellpose import models
