@@ -776,7 +776,7 @@ final class ApposeEnvironments {
             kept.add(envPrefix.resolve("lib").toString());
             List<String> dropped = new java.util.ArrayList<>();
             String current = inherited.getOrDefault("LD_LIBRARY_PATH", "");
-            for (String dir : current.split(File.pathSeparator)) {
+            for (String dir : current.split(":")) {
                 if (dir.isBlank() || kept.contains(dir))
                     continue;
                 if (isDriverDir.test(dir))
@@ -787,7 +787,8 @@ final class ApposeEnvironments {
             if (!dropped.isEmpty())
                 logger.info("Not passing these LD_LIBRARY_PATH folders to the Cellpose worker (no NVIDIA driver in them): {}",
                         dropped);
-            vars.put("LD_LIBRARY_PATH", String.join(File.pathSeparator, kept));
+            // a Linux variable: always ":", whatever platform the tests run on
+            vars.put("LD_LIBRARY_PATH", String.join(":", kept));
         }
         return vars;
     }
