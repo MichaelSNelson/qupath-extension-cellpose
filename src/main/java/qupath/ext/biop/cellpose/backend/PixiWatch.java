@@ -228,7 +228,7 @@ final class PixiWatch implements AutoCloseable {
         String name = Path.of(command.isEmpty() ? "x" : command).getFileName().toString();
         return (name.equals("pixi") || name.equals("pixi.exe"))
                 && commandLine.matches(".*\\sinstall(\\s.*|$)")
-                && commandLine.contains(Path.of(envDir, "pixi.toml").toString());
+                && commandLine.replace('\\', '/').contains(Path.of(envDir, "pixi.toml").toString().replace('\\', '/'));
     }
 
     private static boolean isOurs(ProcessHandle h) {
